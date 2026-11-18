@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { useElementSize } from '@vueuse/core'
 import {
-  ArrowLeft, Loader2, Lock, LogOut, MessageCircle, ShieldAlert, ShieldCheck, Sparkles, Upload, UserPlus, Users,
+  ArrowLeft, Copy, Loader2, Lock, LogOut, MessageCircle, ShieldAlert, ShieldCheck, Sparkles, Upload, UserMinus, UserPlus, Users,
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import {
@@ -17,12 +17,18 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import VerifyDialog from '@/components/VerifyDialog.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
+import { copyText, friendsOpen } from '@/lib/ui'
 
 defineEmits<{ back: [] }>()
 
 const conv = computed(() => chat.state.conversations.find((c) => c.id === chat.state.active) ?? null)
-const dmName = computed(() => (conv.value?.kind === 'dm' ? conv.value.id.slice(3) : null))
-const contact = computed(() => (dmName.value ? chat.state.contacts[dmName.value] ?? null : null))
+const dmId = computed(() => (conv.value?.kind === 'dm' ? conv.value.id.slice(3) : null))
+const contact = computed(() => (dmId.value ? chat.state.contacts[dmId.value] ?? null : null))
+const convKey = computed(() => (conv.value ? conv.value.id.slice(conv.value.kind === 'dm' ? 3 : 2) : ''))
+const hasFriends = computed(() => Object.values(chat.state.contacts).some((c) => c.friend))
+const myId = computed(() => chat.formatId(chat.state.account?.id ?? ''))
+const nameOf = (id: string) => chat.displayName(id)
+const removeOpen = ref(false)
 const group = computed(() =>
   conv.value?.kind === 'group' ? chat.state.groups[conv.value.id.slice(2)] ?? null : null,
 )
@@ -68,11 +74,34 @@ async function trust() {
   }
   busy.value = true
   try {
-    await chat.trustNewKey(c.name, c.pendingFingerprint)
+    await chat.trustNewKey(c.id, c.pendingFingerprint)
   } catch (e) {
     toast.error(errMsg(e))
   } finally {
     busy.value = false
+  }
+}
+
+async function removeFriend() {
+  const c = contact.value
+  if (!c) return
+  busy.value = true
+  try {
+    await chat.removeFriend(c.id)
+    removeOpen.value = false
+  } catch (e) {
+    toast.error(errMsg(e))
+  } finally {
+    busy.value = false
+  }
+}
+
+async function addFriend(id: string) {
+  try {
+    await chat.sendFriendRequest(id)
+    toast.success('Friend request sent')
+  } catch (e) {
+    toast.error(errMsg(e))
   }
 }
 
@@ -106,11 +135,24 @@ async function leave() {
           <Sparkles class="absolute -top-2 -right-2 size-6 text-[oklch(0.85_0.12_85)]" />
         </div>
       </div>
-      <div class="max-w-sm space-y-2">
+      <div v-if="hasFriends" class="max-w-sm space-y-2">
         <h2 class="text-2xl font-semibold tracking-tight">Your messages, only yours</h2>
         <p class="text-[15px] leading-relaxed text-muted-foreground">
           Pick a conversation to start chatting. Everything is encrypted on this device before it leaves.
         </p>
+      </div>
+      <div v-else class="flex max-w-sm flex-col items-center gap-4">
+        <div class="space-y-2">
+          <h2 class="text-2xl font-semibold tracking-tight">Find your people</h2>
+          <p class="text-[15px] leading-relaxed text-muted-foreground">
+            Share your ID with a friend, or add theirs, to start an encrypted chat.
+          </p>
+        </div>
+        <button class="well flex items-center gap-3 rounded-2xl px-4 py-3 transition-colors hover:bg-hover" title="Copy your ID" @click="copyText(myId, 'ID copied')">
+          <span class="font-mono text-2xl font-semibold tracking-[0.12em]">{{ myId }}</span>
+          <Copy class="size-4 text-muted-foreground" />
+        </button>
+        <button class="btn btn-primary" @click="friendsOpen = true"><UserPlus />Add a friend</button>
       </div>
     </div>
 
@@ -120,7 +162,7 @@ async function leave() {
       <div ref="topEl" class="pointer-events-none absolute inset-x-0 top-0 z-10 space-y-2 p-2 sm:p-3">
         <header class="glass pointer-events-auto flex items-center gap-3 rounded-2xl px-3 py-2.5">
           <button class="btn btn-ghost btn-icon md:hidden" title="Back" aria-label="Back" @click="$emit('back')"><ArrowLeft /></button>
-          <UserAvatar :name="conv.title" :size="40" :online="contact?.online" style="--dot-ring: var(--card)" />
+          <UserAvatar :name="conv.title" :id="convKey" :size="40" :online="contact?.online" style="--dot-ring: var(--card)" />
           <div class="min-w-0 flex-1 leading-tight">
             <div class="flex items-center gap-1.5">
               <h1 class="truncate text-[15.5px] font-semibold">{{ conv.title }}</h1>
@@ -135,6 +177,7 @@ async function leave() {
           </div>
 
           <template v-if="contact">
+            <button class="btn btn-ghost btn-icon hover:!text-destructive" title="Remove friend" aria-label="Remove friend" @click="removeOpen = true"><UserMinus /></button>
             <button class="btn btn-soft btn-sm" title="Verify security key" @click="verifyOpen = true">
               <ShieldCheck :class="contact.verified && 'text-success'" /><span class="hidden sm:inline">{{ contact.verified ? 'Verified' : 'Verify' }}</span>
             </button>
@@ -187,6 +230,15 @@ async function leave() {
       </Transition>
 
       <VerifyDialog v-if="contact" v-model:open="verifyOpen" :contact="contact" />
+      <ConfirmDialog
+        v-if="contact"
+        v-model:open="removeOpen"
+        title="Remove friend?"
+        :description="`${contact.name} will be removed from your friends and this direct chat will no longer be available. You can add them again later with their ID.`"
+        confirm-label="Remove friend"
+        :loading="busy"
+        @confirm="removeFriend"
+      />
 
       <template v-if="group">
         <Dialog v-model:open="membersOpen">
@@ -197,9 +249,10 @@ async function leave() {
             </DialogHeader>
             <ul class="well max-h-72 space-y-0.5 overflow-y-auto rounded-2xl p-1.5 text-sm">
               <li v-for="m in group.members" :key="m" class="flex items-center gap-3 rounded-xl px-2 py-1.5" style="--dot-ring: var(--card)">
-                <UserAvatar :name="m" :size="32" :online="m === chat.state.account?.name ? true : !!chat.state.contacts[m]?.online" />
-                <span class="flex-1 font-medium">{{ m }}</span>
-                <span v-if="m === chat.state.account?.name" class="text-xs text-muted-foreground">you</span>
+                <UserAvatar :name="nameOf(m)" :id="m" :size="32" :online="m === chat.state.account?.id ? true : chat.state.contacts[m]?.friend ? !!chat.state.contacts[m]?.online : undefined" />
+                <span class="flex-1 font-medium">{{ nameOf(m) }}</span>
+                <span v-if="m === chat.state.account?.id" class="text-xs text-muted-foreground">you</span>
+                <button v-else-if="!chat.state.contacts[m]?.friend" class="btn btn-soft btn-sm" @click="addFriend(m)"><UserPlus />Add friend</button>
               </li>
             </ul>
           </DialogContent>

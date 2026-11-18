@@ -1,15 +1,23 @@
 import type { JSONContent } from '@tiptap/core'
 
-/** A saved local account (identity keys never leave the device). */
+/** The signed-in account. */
 export interface Account {
   server: string // e.g. "https://chat.example.com"
-  name: string
+  /** Public user ID (8 chars, Crockford base32). Share it so friends can add you. */
+  id: string
+  /** Login name, also shown to friends and group members. */
+  username: string
 }
 
-export type ConvId = `dm:${string}` | `g:${string}`
+export type ConvId = `dm:${string}` | `g:${string}` // dm:<user id> | g:<group id>
 
+/** Anyone we know: friends, and members of our groups who aren't friends. Keyed by user ID. */
 export interface Contact {
+  id: string
   name: string
+  /** Mutual friend: can DM. Non-friends only appear through shared groups. */
+  friend: boolean
+  /** Only known for friends. */
   online: boolean
   /** Fingerprint of the key pinned for this contact (shown for out-of-band verification). */
   fingerprint: string
@@ -21,9 +29,16 @@ export interface Contact {
   pendingFingerprint: string | null
 }
 
+export interface FriendRequest {
+  id: string
+  name: string
+  ts: number
+}
+
 export interface Group {
   id: string
   name: string
+  /** User IDs. */
   members: string[]
 }
 
@@ -34,9 +49,10 @@ export interface FileInfo {
 }
 
 export interface ChatMessage {
-  /** Unique per conversation history: "<sender>/<envelope id>" (system notes: "/<random>"). */
+  /** Unique per conversation history: "<sender id>/<envelope id>" (system notes: "/<random>"). */
   id: string
   conv: ConvId
+  /** Sender's user ID ('' for system notes). Use chat.displayName(from). */
   from: string
   ts: number // ms since epoch
   kind: 'text' | 'file' | 'system'
@@ -63,3 +79,5 @@ export type ConnectionStatus = 'offline' | 'connecting' | 'online'
 
 /** Max file size the app will send (bytes). */
 export const MAX_FILE_BYTES = 10 * 1024 * 1024
+/** Minimum password length. The password protects your keys, so it must be strong. */
+export const MIN_PASSWORD = 10

@@ -42,7 +42,7 @@ watch(
   () => chat.state.messages.length,
   async () => {
     const last = chat.state.messages[chat.state.messages.length - 1]
-    if (!stick && last?.from !== chat.state.account?.name) return
+    if (!stick && last?.from !== chat.state.account?.id) return
     await nextTick()
     toBottom()
   },

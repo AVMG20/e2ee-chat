@@ -26,7 +26,6 @@ import { randomBytes } from '@noble/hashes/utils.js'
 export const ENVELOPE_VERSION = 1
 const WRAP_SALT = utf8('e2ee-chat/wrap/v1')
 const SIG_CONTEXT = 'e2ee-chat/envelope/v1'
-const AUTH_CONTEXT = 'e2ee-chat-auth-v1:' // must match server
 const KC_CONTEXT = utf8('e2ee-chat/kc/v1')
 
 // ---------------------------------------------------------------------------
@@ -100,10 +99,6 @@ export function generateIdentity(): Identity {
   }
 }
 
-/** Signature over the server's login challenge. */
-export function signChallenge(id: Identity, nonce: string): string {
-  return b64(ed25519.sign(utf8(AUTH_CONTEXT + nonce), id.signSk))
-}
 
 /** Human-comparable fingerprint of a user's public keys: 8 groups of 5 digits. */
 export function fingerprint(keys: PublicKeys): string {
@@ -260,4 +255,76 @@ export function open(me: Identity, myName: string, senderSignPk: Uint8Array, env
 /** Recipient names an envelope was addressed to (signed, so trustworthy after open()). */
 export function recipientsOf(env: Envelope): string[] {
   return env.keys.map((k) => k.to)
+}
+
+// ---------------------------------------------------------------------------
+// Password-locked keys (one account on many devices)
+// ---------------------------------------------------------------------------
+//
+// argon2id(password, salt) -> master. From master, HKDF derives two unrelated keys:
+//   authKey: sent to the server to log in (the server stores only its hash),
+//   lockKey: never leaves the device; encrypts the private keys ("bundle")
+//            that the server stores for the account.
+// The server never sees the password or lockKey, so it can't open the bundle
+// except by guessing the password, which argon2id makes slow.
+
+/** Fixed client-side, so a malicious server can't talk us into weak parameters. */
+export const KDF_PARAMS = { t: 3, m: 64 * 1024, p: 1 } as const
+const BUNDLE_CONTEXT = 'e2ee-chat/bundle/v1'
+
+export interface PasswordKeys {
+  authKey: Uint8Array
+  lockKey: Uint8Array
+}
+
+export async function deriveFromPassword(password: string, salt: Uint8Array): Promise<PasswordKeys> {
+  const { argon2idAsync } = await import('@noble/hashes/argon2.js')
+  const master = await argon2idAsync(utf8(password.normalize('NFKC')), salt, { ...KDF_PARAMS, dkLen: 32 })
+  const keys = {
+    authKey: hkdf(sha256, master, salt, utf8('e2ee-chat/auth/v1'), 32),
+    lockKey: hkdf(sha256, master, salt, utf8('e2ee-chat/lock/v1'), 32),
+  }
+  master.fill(0)
+  return keys
+}
+
+/** Encrypts the private keys with the password-derived lock key. */
+export function lockIdentity(id: Identity, lockKey: Uint8Array, username: string): string {
+  const nonce = randomBytes(24)
+  const plain = utf8(JSON.stringify({ signSk: b64(id.signSk), encSk: b64(id.encSk) }))
+  const ct = xchacha20poly1305(lockKey, nonce, utf8(`${BUNDLE_CONTEXT}\n${username}`)).encrypt(plain)
+  return b64(concat(nonce, ct))
+}
+
+export function unlockIdentity(bundle: string, lockKey: Uint8Array, username: string): Identity {
+  const raw = unb64(bundle)
+  const plain = xchacha20poly1305(lockKey, raw.subarray(0, 24), utf8(`${BUNDLE_CONTEXT}\n${username}`)).decrypt(
+    raw.subarray(24),
+  )
+  const { signSk, encSk } = JSON.parse(new TextDecoder().decode(plain)) as { signSk: string; encSk: string }
+  const sk = unb64(signSk)
+  const ek = unb64(encSk)
+  return { signSk: sk, signPk: ed25519.getPublicKey(sk), encSk: ek, encPk: x25519.getPublicKey(ek) }
+}
+
+// ---------------------------------------------------------------------------
+// Vault: settings synced between a user's devices (contact pins, groups)
+// ---------------------------------------------------------------------------
+
+const VAULT_CONTEXT = 'e2ee-chat/vault/v1'
+
+function vaultKey(id: Identity): Uint8Array {
+  return hkdf(sha256, id.encSk, utf8(VAULT_CONTEXT), utf8('key'), 32)
+}
+
+export function sealVault(id: Identity, data: unknown): string {
+  const nonce = randomBytes(24)
+  const ct = xchacha20poly1305(vaultKey(id), nonce, utf8(VAULT_CONTEXT)).encrypt(utf8(JSON.stringify(data)))
+  return b64(concat(nonce, ct))
+}
+
+export function openVault(id: Identity, sealed: string): unknown {
+  const raw = unb64(sealed)
+  const plain = xchacha20poly1305(vaultKey(id), raw.subarray(0, 24), utf8(VAULT_CONTEXT)).decrypt(raw.subarray(24))
+  return JSON.parse(new TextDecoder().decode(plain))
 }

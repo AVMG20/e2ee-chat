@@ -19,9 +19,10 @@ const props = defineProps<{
   animate: boolean
 }>()
 
-const mine = computed(() => props.msg.from === chat.state.account?.name)
+const mine = computed(() => props.msg.from === chat.state.account?.id)
 const html = computed(() => (props.msg.kind === 'text' ? renderMessageHtml(props.msg.doc) : ''))
 const isImage = computed(() => props.msg.kind === 'file' && !!props.msg.file?.mime.startsWith('image/'))
+const senderName = computed(() => chat.displayName(props.msg.from))
 const time = computed(() => formatTime(props.msg.ts))
 
 const bubbleClass = computed(() => {
@@ -45,7 +46,7 @@ const bubbleClass = computed(() => {
     :class="[mine ? 'justify-end' : 'justify-start', head ? 'mt-3.5' : 'mt-[3px]', animate && ['msg-in', mine ? 'msg-in-me' : 'msg-in-them']]"
   >
     <div v-if="showSender && !mine" class="w-8 shrink-0">
-      <UserAvatar v-if="tail" :name="msg.from" :size="32" />
+      <UserAvatar v-if="tail" :name="senderName" :id="msg.from" :size="32" />
     </div>
 
     <div class="flex min-w-0 max-w-[84%] flex-col sm:max-w-[70%]" :class="mine ? 'items-end' : 'items-start'">
@@ -53,7 +54,7 @@ const bubbleClass = computed(() => {
         v-if="head && showSender && !mine"
         class="hue-text mb-1 px-3 text-xs font-semibold tracking-tight"
         :style="{ '--h': hueOf(msg.from) }"
-      >{{ msg.from }}</div>
+      >{{ senderName }}</div>
 
       <FileMessage v-if="isImage" :msg="msg" :mine="mine" :time="time" :sending="msg.status === 'sending'" />
       <div v-else class="bubble" :class="bubbleClass">

@@ -10,13 +10,16 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 
+const friendList = () =>
+  Object.values(chat.state.contacts).filter((c) => c.friend).sort((a, b) => a.name.localeCompare(b.name))
+
 const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ created: [] }>()
 
 const name = ref('')
 const selected = ref<string[]>([])
 const busy = ref(false)
-const contacts = computed(() => Object.keys(chat.state.contacts).sort())
+const contacts = computed(() => friendList())
 
 watch(open, (o) => {
   if (o) {
@@ -60,11 +63,11 @@ async function submit() {
         <div>
           <div class="label">Members <span v-if="selected.length" class="text-primary">· {{ selected.length }} selected</span></div>
           <div class="well max-h-56 space-y-0.5 overflow-y-auto rounded-2xl p-1.5">
-            <p v-if="!contacts.length" class="p-2 text-xs text-muted-foreground">No contacts available.</p>
-            <label v-for="n in contacts" :key="n" class="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-1.5 text-sm transition-colors hover:bg-hover">
-              <UserAvatar :name="n" :size="28" />
-              <span class="flex-1 font-medium">{{ n }}</span>
-              <Checkbox :model-value="selected.includes(n)" @update:model-value="toggle(n, $event)" />
+            <p v-if="!contacts.length" class="p-2 text-xs text-muted-foreground">Add some friends first, then you can group them.</p>
+            <label v-for="f in contacts" :key="f.id" class="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-1.5 text-sm transition-colors hover:bg-hover">
+              <UserAvatar :name="f.name" :id="f.id" :size="28" />
+              <span class="flex-1 font-medium">{{ f.name }}</span>
+              <Checkbox :model-value="selected.includes(f.id)" @update:model-value="toggle(f.id, $event)" />
             </label>
           </div>
         </div>

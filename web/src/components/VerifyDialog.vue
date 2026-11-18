@@ -26,7 +26,7 @@ function mine(): string {
 async function setVerified(v: boolean | 'indeterminate') {
   busy.value = true
   try {
-    await chat.setVerified(props.contact.name, v === true)
+    await chat.setVerified(props.contact.id, v === true)
   } catch (e) {
     toast.error(errMsg(e))
   } finally {

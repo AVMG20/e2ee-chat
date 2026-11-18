@@ -1,6 +1,20 @@
 import { describe, expect, test } from 'bun:test'
 import { ed25519 } from '@noble/curves/ed25519.js'
-import { type Envelope, b64, fingerprint, generateIdentity, open, seal, unb64, utf8 } from '../src/lib/crypto'
+import {
+  type Envelope,
+  b64,
+  deriveFromPassword,
+  fingerprint,
+  generateIdentity,
+  lockIdentity,
+  open,
+  openVault,
+  seal,
+  sealVault,
+  unb64,
+  unlockIdentity,
+  utf8,
+} from '../src/lib/crypto'
 
 const alice = generateIdentity()
 const bob = generateIdentity()
@@ -76,5 +90,27 @@ describe('envelopes', () => {
     expect(fingerprint(alice)).toBe(fingerprint({ signPk: alice.signPk, encPk: alice.encPk }))
     expect(fingerprint(alice)).not.toBe(fingerprint(bob))
     expect(fingerprint(alice)).toMatch(/^(\d{5} ){7}\d{5}$/)
+  })
+})
+
+describe('password-locked keys', () => {
+  test('bundle round-trips only with the right password', async () => {
+    const salt = new Uint8Array(16).fill(3)
+    const right = await deriveFromPassword('correct horse battery', salt)
+    const wrong = await deriveFromPassword('correct horse batterz', salt)
+    const bundle = lockIdentity(alice, right.lockKey, 'alice')
+    const back = unlockIdentity(bundle, right.lockKey, 'alice')
+    expect(b64(back.signPk)).toBe(b64(alice.signPk))
+    expect(b64(back.encPk)).toBe(b64(alice.encPk))
+    expect(() => unlockIdentity(bundle, wrong.lockKey, 'alice')).toThrow()
+    expect(() => unlockIdentity(bundle, right.lockKey, 'mallory')).toThrow()
+    // The server-facing key reveals nothing about the lock key.
+    expect(b64(right.authKey)).not.toBe(b64(right.lockKey))
+  }, 30_000)
+
+  test('vault opens only with the same identity', () => {
+    const sealed = sealVault(alice, { pins: { X: 1 } })
+    expect(openVault(alice, sealed)).toEqual({ pins: { X: 1 } })
+    expect(() => openVault(bob, sealed)).toThrow()
   })
 })

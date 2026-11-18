@@ -4,12 +4,14 @@ import { hueOf, initials } from '@/lib/format'
 
 const props = withDefaults(defineProps<{
   name: string
+  /** Stable user/group ID; the colour hash comes from this (falls back to the name). */
+  id?: string
   size?: number
   /** undefined hides the dot. */
   online?: boolean
-}>(), { size: 40, online: undefined })
+}>(), { id: undefined, size: 40, online: undefined })
 
-const box = computed(() => ({ width: `${props.size}px`, height: `${props.size}px`, '--h': hueOf(props.name) }))
+const box = computed(() => ({ width: `${props.size}px`, height: `${props.size}px`, '--h': hueOf(props.id ?? props.name) }))
 const dot = computed(() => {
   const d = Math.max(9, Math.round(props.size * 0.28))
   return { width: `${d}px`, height: `${d}px`, boxShadow: '0 0 0 2.5px var(--dot-ring, var(--sidebar))' }

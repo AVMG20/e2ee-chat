@@ -1,123 +1,168 @@
-//! Blind relay server for e2ee-chat.
+//! Blind relay and mailbox server for e2ee-chat.
 //!
-//! The server never sees plaintext or private keys. It only knows:
-//! - usernames and their *public* keys (directory),
-//! - opaque encrypted envelopes, held until the recipient comes online and acks them.
-//!
-//! Authentication is a challenge/response signed with the user's Ed25519 key, so
-//! there are no passwords to store either.
+//! The server never sees plaintext or private keys. It stores:
+//! - accounts: username, public keys, and the user's private keys *encrypted on
+//!   their device* with a key derived from their password (the server never gets
+//!   the password or that key, only a separate hash used to log in),
+//! - who is friends with whom, and pending friend requests,
+//! - opaque encrypted envelopes, kept for a retention period so every device of
+//!   a user can download its history,
+//! - an opaque encrypted "vault" per user (contact pins, groups) for syncing devices.
 
 use std::{
     collections::{HashMap, HashSet},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use axum::{
     Router,
     extract::{
-        State,
+        ConnectInfo, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    response::IntoResponse,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
     routing::get,
 };
-use axum::http::{HeaderValue, StatusCode, header};
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use ed25519_dalek::{Signature, VerifyingKey};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL},
+};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tower_http::{
     services::{ServeDir, ServeFile},
     set_header::SetResponseHeaderLayer,
 };
 
-/// Domain separation prefix for the login challenge signature.
-pub const AUTH_CONTEXT: &str = "e2ee-chat-auth-v1:";
 /// Largest websocket message accepted (encrypted files are base64 inside JSON).
 pub const MAX_MESSAGE_BYTES: usize = 24 * 1024 * 1024;
-/// Undelivered envelopes are dropped after this many days.
-pub const QUEUE_TTL_DAYS: i64 = 30;
-/// Max bytes waiting in one user's offline mailbox.
-pub const MAX_MAILBOX_BYTES: i64 = 256 * 1024 * 1024;
+/// Max bytes of messages one user can have stored (sent within the retention period).
+pub const MAX_USER_STORAGE: i64 = 512 * 1024 * 1024;
 /// Max bytes queued for sending to one connected client before it's considered too slow.
 const MAX_SESSION_BACKLOG: usize = 64 * 1024 * 1024;
 /// Max connections that haven't logged in yet.
 const MAX_PENDING_AUTH: usize = 64;
-/// Queued envelopes are loaded from the database this many at a time.
-const DELIVERY_PAGE: i64 = 32;
+/// Stored envelopes are sent this many at a time when a device catches up.
+const SYNC_PAGE: i64 = 32;
+const MAX_VAULT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_BUNDLE_BYTES: usize = 4096;
+const MAX_RECIPIENTS: usize = 256;
+const MAX_PENDING_REQUESTS: i64 = 100;
+/// Sessions (signed-in devices) unused for this long are deleted.
+const SESSION_IDLE_DAYS: i64 = 180;
+/// User IDs: 8 chars of Crockford base32 (no I, L, O, U).
+const ID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// Content-Security-Policy for the web app. Same as the desktop app's, plus no framing.
 const CSP: &str = "default-src 'self'; connect-src 'self'; img-src 'self' blob: data:; \
     style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; object-src 'none'; \
     base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Stored messages are deleted after this many days.
+    pub retention_days: i64,
+    /// Take the client IP from the last X-Forwarded-For entry (behind a reverse proxy).
+    pub trust_proxy: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { retention_days: 180, trust_proxy: false }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wire protocol (JSON text frames)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum ClientMsg {
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ClientMsg {
+    /// Before sign-in: salt for a username. When signed in: own salt (for password change).
+    Prelogin {
+        #[serde(default)]
+        req: u64,
+        #[serde(default)]
+        username: String,
+    },
     #[serde(rename_all = "camelCase")]
     Register {
-        name: String,
-        invite: String,
+        username: String,
+        salt: String,
+        auth_key: String,
         sign_pk: String,
         enc_pk: String,
-        sig: String,
+        bundle: String,
     },
+    #[serde(rename_all = "camelCase")]
     Login {
-        name: String,
-        sig: String,
+        username: String,
+        auth_key: String,
+        #[serde(default)]
+        cursor: i64,
     },
-    /// `envelope` is opaque to the server apart from `from` and `keys[].to`.
+    Resume {
+        token: String,
+        #[serde(default)]
+        cursor: i64,
+    },
+    FriendRequest {
+        #[serde(default)]
+        req: u64,
+        id: String,
+    },
+    FriendAccept {
+        #[serde(default)]
+        req: u64,
+        id: String,
+    },
+    FriendDecline {
+        #[serde(default)]
+        req: u64,
+        id: String,
+    },
+    FriendRemove {
+        #[serde(default)]
+        req: u64,
+        id: String,
+    },
+    Lookup {
+        #[serde(default)]
+        req: u64,
+        ids: Vec<String>,
+    },
+    /// `envelope` is opaque to the server apart from `id`, `from` and `keys[].to`.
     Send {
         envelope: Value,
     },
-    Ack {
-        qids: Vec<i64>,
+    VaultPut {
+        #[serde(default)]
+        req: u64,
+        vault: String,
     },
+    #[serde(rename_all = "camelCase")]
+    Password {
+        #[serde(default)]
+        req: u64,
+        auth_key: String,
+        new_salt: String,
+        new_auth_key: String,
+        bundle: String,
+    },
+    Logout,
     Ping,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserInfo {
-    pub name: String,
-    pub sign_pk: String,
-    pub enc_pk: String,
-    pub online: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum ServerMsg<'a> {
-    Challenge { nonce: String },
-    Welcome { name: &'a str },
-    Directory { users: Vec<UserInfo> },
-    User { user: UserInfo },
-    Presence { name: &'a str, online: bool },
-    Deliver { qid: i64, envelope: &'a Value },
-    Sent { id: &'a str },
-    /// A `send` was rejected; nothing was queued.
-    Failed { id: &'a str, message: &'a str },
-    Pong,
-    Error { message: &'a str },
-}
-
-impl ServerMsg<'_> {
-    fn json(&self) -> String {
-        serde_json::to_string(self).expect("server message serializes")
-    }
 }
 
 #[derive(Deserialize)]
@@ -132,6 +177,14 @@ struct KeyMeta {
     to: String,
 }
 
+fn ok(req: u64) -> String {
+    json!({"type": "ok", "req": req}).to_string()
+}
+
+fn err(req: u64, message: &str) -> String {
+    json!({"type": "error", "req": req, "message": message}).to_string()
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -141,17 +194,17 @@ struct Session {
     /// Each frame carries a permit for its size from `budget`, released once written.
     tx: mpsc::UnboundedSender<(String, OwnedSemaphorePermit)>,
     budget: Arc<Semaphore>,
-    /// Ends the session with this message (another login, or too slow to keep up).
-    kick: oneshot::Sender<&'static str>,
+    /// Ends the session with this message (too slow to keep up).
+    kick: Option<oneshot::Sender<&'static str>>,
 }
 
 impl Session {
     /// Queues a frame. Returns false if the client is too far behind.
-    fn push(&self, text: String) -> bool {
+    fn push(&self, text: &str) -> bool {
         let Ok(n) = u32::try_from(text.len()) else { return false };
         match self.budget.clone().try_acquire_many_owned(n.max(1)) {
             Ok(permit) => {
-                let _ = self.tx.send((text, permit));
+                let _ = self.tx.send((text.to_string(), permit));
                 true
             }
             Err(_) => false,
@@ -159,17 +212,62 @@ impl Session {
     }
 }
 
+/// Fixed-window counter per IP address.
+struct Limiter {
+    hits: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+    max: u32,
+    window: Duration,
+}
+
+impl Limiter {
+    fn new(max: u32, window: Duration) -> Self {
+        Self { hits: Mutex::new(HashMap::new()), max, window }
+    }
+
+    fn allowed(&self, ip: IpAddr) -> bool {
+        let hits = self.hits.lock().unwrap();
+        match hits.get(&ip) {
+            Some((n, start)) if start.elapsed() < self.window => *n < self.max,
+            _ => true,
+        }
+    }
+
+    fn hit(&self, ip: IpAddr) {
+        let mut hits = self.hits.lock().unwrap();
+        if hits.len() > 10_000 {
+            hits.retain(|_, (_, start)| start.elapsed() < self.window);
+        }
+        let e = hits.entry(ip).or_insert((0, Instant::now()));
+        if e.1.elapsed() >= self.window {
+            *e = (0, Instant::now());
+        }
+        e.0 += 1;
+    }
+}
+
 pub struct AppState {
     db: Mutex<Connection>,
-    online: Mutex<HashMap<String, Session>>,
-    invite: String,
-    invite_from_config: bool,
+    /// Connected devices per user ID.
+    online: Mutex<HashMap<String, Vec<Session>>>,
+    config: Config,
+    /// Server secret used to make fake salts for unknown usernames.
+    secret: String,
     next_session: AtomicU64,
     pending_auth: Arc<Semaphore>,
+    auth_failures: Limiter,
+    registrations: Limiter,
+}
+
+struct Account {
+    id: String,
+    username: String,
+    salt: String,
+    auth_hash: Vec<u8>,
+    bundle: String,
 }
 
 impl AppState {
-    pub fn open(db_path: &Path, invite: Option<String>) -> Result<Arc<Self>> {
+    pub fn open(db_path: &Path, config: Config) -> Result<Arc<Self>> {
         if let Some(dir) = db_path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
@@ -177,141 +275,265 @@ impl AppState {
             .with_context(|| format!("opening database {}", db_path.display()))?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-             CREATE TABLE IF NOT EXISTS users (
-                 name TEXT PRIMARY KEY,
+             PRAGMA foreign_keys=ON;
+             -- tables of the earlier invite-only version
+             DROP TABLE IF EXISTS queue;
+             DROP TABLE IF EXISTS users;
+             CREATE TABLE IF NOT EXISTS accounts (
+                 id TEXT PRIMARY KEY,
+                 username TEXT NOT NULL UNIQUE,
                  sign_pk TEXT NOT NULL,
                  enc_pk TEXT NOT NULL,
+                 salt TEXT NOT NULL,
+                 auth_hash BLOB NOT NULL,
+                 bundle TEXT NOT NULL,
+                 vault TEXT,
                  created_at INTEGER NOT NULL DEFAULT (unixepoch())
              );
-             CREATE TABLE IF NOT EXISTS queue (
+             CREATE TABLE IF NOT EXISTS sessions (
+                 token_hash BLOB PRIMARY KEY,
+                 user_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                 created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                 last_used INTEGER NOT NULL DEFAULT (unixepoch())
+             );
+             CREATE TABLE IF NOT EXISTS friends (
+                 a TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                 b TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                 PRIMARY KEY (a, b)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS friend_requests (
+                 from_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                 to_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                 created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                 PRIMARY KEY (from_id, to_id)
+             ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS friend_requests_to ON friend_requests(to_id);
+             CREATE TABLE IF NOT EXISTS messages (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 recipient TEXT NOT NULL,
+                 sender TEXT NOT NULL,
                  envelope TEXT NOT NULL,
-                 size INTEGER NOT NULL DEFAULT 0,
+                 size INTEGER NOT NULL,
                  created_at INTEGER NOT NULL DEFAULT (unixepoch())
              );
-             CREATE INDEX IF NOT EXISTS queue_recipient ON queue(recipient, id);
+             CREATE INDEX IF NOT EXISTS messages_sender ON messages(sender);
+             CREATE INDEX IF NOT EXISTS messages_created ON messages(created_at);
+             CREATE TABLE IF NOT EXISTS inbox (
+                 user_id TEXT NOT NULL,
+                 msg_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                 PRIMARY KEY (user_id, msg_id)
+             ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS inbox_msg ON inbox(msg_id);
              CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )?;
 
-        let has_size: bool = conn
-            .prepare("SELECT 1 FROM pragma_table_info('queue') WHERE name = 'size'")?
-            .exists([])?;
-        if !has_size {
-            conn.execute_batch(
-                "ALTER TABLE queue ADD COLUMN size INTEGER NOT NULL DEFAULT 0;
-                 UPDATE queue SET size = length(CAST(envelope AS BLOB));",
-            )?;
-        }
-
-        let invite = invite.filter(|s| !s.trim().is_empty());
-        let invite_from_config = invite.is_some();
-        let invite = match invite {
-            Some(code) => code.trim().to_string(),
+        let secret: Option<String> = conn
+            .query_row("SELECT value FROM settings WHERE key = 'secret'", [], |r| r.get(0))
+            .optional()?;
+        let secret = match secret {
+            Some(s) => s,
             None => {
-                let stored: Option<String> = conn
-                    .query_row("SELECT value FROM settings WHERE key='invite'", [], |r| r.get(0))
-                    .optional()?;
-                match stored {
-                    Some(code) => code,
-                    None => {
-                        let code = random_token(12);
-                        conn.execute(
-                            "INSERT INTO settings(key, value) VALUES ('invite', ?1)",
-                            [&code],
-                        )?;
-                        code
-                    }
-                }
+                let s = random_token(32);
+                conn.execute("INSERT INTO settings(key, value) VALUES ('secret', ?1)", [&s])?;
+                s
             }
         };
 
         Ok(Arc::new(Self {
             db: Mutex::new(conn),
             online: Mutex::new(HashMap::new()),
-            invite,
-            invite_from_config,
+            config,
+            secret,
             next_session: AtomicU64::new(1),
             pending_auth: Arc::new(Semaphore::new(MAX_PENDING_AUTH)),
+            auth_failures: Limiter::new(20, Duration::from_secs(600)),
+            registrations: Limiter::new(10, Duration::from_secs(3600)),
         }))
     }
 
-    pub fn invite_code(&self) -> &str {
-        &self.invite
-    }
-
-    /// True if the invite came from configuration (so the operator already knows it).
-    pub fn invite_from_config(&self) -> bool {
-        self.invite_from_config
-    }
-
-    pub fn prune_queue(&self) -> Result<usize> {
+    /// Deletes expired messages and idle sessions. Returns the number of messages deleted.
+    pub fn prune(&self) -> Result<usize> {
         let db = self.db.lock().unwrap();
-        Ok(db.execute(
-            "DELETE FROM queue WHERE created_at < unixepoch() - ?1",
-            [QUEUE_TTL_DAYS * 86_400],
-        )?)
+        let n = db.execute(
+            "DELETE FROM messages WHERE created_at < unixepoch() - ?1",
+            [self.config.retention_days * 86_400],
+        )?;
+        db.execute(
+            "DELETE FROM sessions WHERE last_used < unixepoch() - ?1",
+            [SESSION_IDLE_DAYS * 86_400],
+        )?;
+        db.execute("DELETE FROM friend_requests WHERE created_at < unixepoch() - ?1", [90 * 86_400])?;
+        Ok(n)
     }
 
-    fn user_keys(&self, name: &str) -> Result<Option<(String, String)>> {
+    fn account_by_username(&self, username: &str) -> Result<Option<Account>> {
         let db = self.db.lock().unwrap();
         Ok(db
             .query_row(
-                "SELECT sign_pk, enc_pk FROM users WHERE name = ?1",
-                [name],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                "SELECT id, username, salt, auth_hash, bundle FROM accounts WHERE username = ?1",
+                [username],
+                |r| {
+                    Ok(Account {
+                        id: r.get(0)?,
+                        username: r.get(1)?,
+                        salt: r.get(2)?,
+                        auth_hash: r.get(3)?,
+                        bundle: r.get(4)?,
+                    })
+                },
             )
             .optional()?)
     }
 
-    fn directory(&self) -> Result<Vec<UserInfo>> {
+    fn username_of(&self, id: &str) -> Result<Option<String>> {
+        let db = self.db.lock().unwrap();
+        Ok(db.query_row("SELECT username FROM accounts WHERE id = ?1", [id], |r| r.get(0)).optional()?)
+    }
+
+    fn vault_of(&self, id: &str) -> Result<Option<String>> {
+        let db = self.db.lock().unwrap();
+        Ok(db.query_row("SELECT vault FROM accounts WHERE id = ?1", [id], |r| r.get(0))?)
+    }
+
+    /// Public info for the given user IDs (unknown IDs are skipped).
+    fn users(&self, ids: &[String]) -> Result<Vec<Value>> {
         let online: HashSet<String> = self.online.lock().unwrap().keys().cloned().collect();
         let db = self.db.lock().unwrap();
-        let mut stmt = db.prepare("SELECT name, sign_pk, enc_pk FROM users ORDER BY name")?;
-        let users = stmt
-            .query_map([], |r| {
-                let name: String = r.get(0)?;
-                Ok(UserInfo {
-                    online: online.contains(&name),
-                    name,
-                    sign_pk: r.get(1)?,
-                    enc_pk: r.get(2)?,
+        let mut stmt = db.prepare_cached("SELECT id, username, sign_pk, enc_pk FROM accounts WHERE id = ?1")?;
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(v) = stmt
+                .query_row([id], |r| {
+                    let id: String = r.get(0)?;
+                    Ok(json!({"id": id, "name": r.get::<_, String>(1)?, "signPk": r.get::<_, String>(2)?,
+                              "encPk": r.get::<_, String>(3)?, "online": online.contains(&id)}))
                 })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(users)
-    }
-
-    fn mailbox_bytes(&self, name: &str) -> Result<i64> {
-        let db = self.db.lock().unwrap();
-        Ok(db.query_row("SELECT coalesce(sum(size), 0) FROM queue WHERE recipient = ?1", [name], |r| r.get(0))?)
-    }
-
-    fn broadcast(&self, text: &str, except: Option<&str>) {
-        let names: Vec<String> = {
-            let online = self.online.lock().unwrap();
-            online.keys().filter(|n| Some(n.as_str()) != except).cloned().collect()
-        };
-        for name in names {
-            self.send_to(&name, text.to_string());
-        }
-    }
-
-    /// Sends a frame to a connected user. A client that falls too far behind is
-    /// disconnected; it reconnects and picks up the rest from its mailbox.
-    fn send_to(&self, name: &str, text: String) {
-        let slow = {
-            let mut online = self.online.lock().unwrap();
-            match online.get(name) {
-                Some(s) if !s.push(text) => online.remove(name),
-                _ => None,
+                .optional()?
+            {
+                out.push(v);
             }
-        };
-        if let Some(s) = slow {
-            tracing::debug!(user = %name, "client too slow, disconnecting");
-            let _ = s.kick.send("Connection too slow, reconnecting");
-            self.broadcast(&ServerMsg::Presence { name, online: false }.json(), Some(name));
         }
+        Ok(out)
+    }
+
+    fn friend_ids(&self, id: &str) -> Result<Vec<String>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare_cached("SELECT b FROM friends WHERE a = ?1")?;
+        let ids = stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
+    fn are_friends(&self, a: &str, b: &str) -> Result<bool> {
+        let db = self.db.lock().unwrap();
+        Ok(db.query_row("SELECT 1 FROM friends WHERE a = ?1 AND b = ?2", [a, b], |_| Ok(())).optional()?.is_some())
+    }
+
+    /// Friends (with keys and presence) plus pending requests both ways.
+    fn friends_snapshot(&self, id: &str) -> Result<String> {
+        let friends = self.users(&self.friend_ids(id)?)?;
+        let db = self.db.lock().unwrap();
+        let requests = |sql: &str| -> Result<Vec<Value>> {
+            let mut stmt = db.prepare_cached(sql)?;
+            let rows = stmt
+                .query_map([id], |r| {
+                    Ok(json!({"id": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)?,
+                              "ts": r.get::<_, i64>(2)? * 1000}))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        };
+        let incoming = requests(
+            "SELECT r.from_id, a.username, r.created_at FROM friend_requests r
+             JOIN accounts a ON a.id = r.from_id WHERE r.to_id = ?1 ORDER BY r.created_at",
+        )?;
+        let outgoing = requests(
+            "SELECT r.to_id, a.username, r.created_at FROM friend_requests r
+             JOIN accounts a ON a.id = r.to_id WHERE r.from_id = ?1 ORDER BY r.created_at",
+        )?;
+        Ok(json!({"type": "friends", "friends": friends, "incoming": incoming, "outgoing": outgoing}).to_string())
+    }
+
+    fn push_friends_snapshot(&self, id: &str) {
+        if !self.online.lock().unwrap().contains_key(id) {
+            return;
+        }
+        match self.friends_snapshot(id) {
+            Ok(text) => self.push_user(id, &text, None),
+            Err(e) => tracing::warn!("friends snapshot failed: {e:#}"),
+        }
+    }
+
+    /// Sends a frame to every connected device of a user (optionally except one session).
+    /// A device that falls too far behind is disconnected; it reconnects and catches up.
+    fn push_user(&self, user: &str, text: &str, except: Option<u64>) {
+        let (slow, now_offline) = {
+            let mut online = self.online.lock().unwrap();
+            let Some(list) = online.get_mut(user) else { return };
+            let mut slow = Vec::new();
+            let mut i = 0;
+            while i < list.len() {
+                if Some(list[i].id) == except || list[i].push(text) {
+                    i += 1;
+                } else {
+                    slow.push(list.swap_remove(i));
+                }
+            }
+            let now_offline = list.is_empty();
+            if now_offline {
+                online.remove(user);
+            }
+            (slow, now_offline)
+        };
+        for mut s in slow {
+            tracing::debug!(user, "client too slow, disconnecting");
+            if let Some(kick) = s.kick.take() {
+                let _ = kick.send("Connection too slow, reconnecting");
+            }
+        }
+        if now_offline {
+            self.presence_changed(user, false);
+        }
+    }
+
+    fn presence_changed(&self, user: &str, online: bool) {
+        let text = json!({"type": "presence", "id": user, "online": online}).to_string();
+        for friend in self.friend_ids(user).unwrap_or_default() {
+            self.push_user(&friend, &text, None);
+        }
+    }
+
+    fn fake_salt(&self, username: &str) -> String {
+        let h = Sha256::new()
+            .chain_update(self.secret.as_bytes())
+            .chain_update(b"/salt/")
+            .chain_update(username.as_bytes())
+            .finalize();
+        B64.encode(&h[..16])
+    }
+
+    fn create_session(&self, user_id: &str) -> Result<String> {
+        let token = random_token(32);
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO sessions(token_hash, user_id) VALUES (?1, ?2)",
+            params![sha256(token.as_bytes()), user_id],
+        )?;
+        Ok(token)
+    }
+
+    fn resume_session(&self, token: &str) -> Result<Option<(String, String)>> {
+        let db = self.db.lock().unwrap();
+        let hash = sha256(token.as_bytes());
+        let row: Option<(String, String)> = db
+            .query_row(
+                "SELECT a.id, a.username FROM sessions s JOIN accounts a ON a.id = s.user_id WHERE s.token_hash = ?1",
+                [&hash],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if row.is_some() {
+            db.execute("UPDATE sessions SET last_used = unixepoch() WHERE token_hash = ?1", [&hash])?;
+        }
+        Ok(row)
     }
 }
 
@@ -328,23 +550,43 @@ pub fn router(state: Arc<AppState>, web_dir: Option<PathBuf>) -> Router {
         let index = dir.join("index.html");
         app = app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)));
     }
-    let set = |name, value: &'static str| {
-        SetResponseHeaderLayer::if_not_present(name, HeaderValue::from_static(value))
-    };
+    let set = |name, value: &'static str| SetResponseHeaderLayer::if_not_present(name, HeaderValue::from_static(value));
     app.layer(set(header::CONTENT_SECURITY_POLICY, CSP))
         .layer(set(header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
         .layer(set(header::REFERRER_POLICY, "no-referrer"))
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> axum::response::Response {
+fn client_ip(state: &AppState, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
+    if state.config.trust_proxy {
+        let forwarded = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .filter_map(|s| s.trim().parse().ok())
+            .last();
+        if let Some(ip) = forwarded {
+            return ip;
+        }
+    }
+    peer.ip()
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
     // Bound the number of sockets sitting in the login handshake.
     let Ok(permit) = state.pending_auth.clone().try_acquire_owned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "busy, try again").into_response();
     };
+    let ip = client_ip(&state, peer, &headers);
     ws.max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
-            if let Err(e) = handle_socket(socket, state, permit).await {
+            if let Err(e) = handle_socket(socket, state, permit, ip).await {
                 tracing::debug!("connection ended: {e:#}");
             }
         })
@@ -353,7 +595,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
 pub async fn serve(addr: SocketAddr, app: Router) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
@@ -362,11 +604,57 @@ pub async fn serve(addr: SocketAddr, app: Router) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+fn valid_username(name: &str) -> bool {
+    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    (3..=24).contains(&name.len())
+        && name.bytes().next().is_some_and(alnum)
+        && name.bytes().all(|b| alnum(b) || b == b'_' || b == b'.')
+}
+
+pub fn valid_user_id(id: &str) -> bool {
+    id.len() == 8 && id.bytes().all(|b| ID_ALPHABET.contains(&b))
+}
+
+fn decode_len(s: &str, len: usize) -> Option<Vec<u8>> {
+    B64.decode(s).ok().filter(|b| b.len() == len)
+}
+
+fn sha256(data: &[u8]) -> Vec<u8> {
+    Sha256::digest(data).to_vec()
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn auth_matches(account: &Account, auth_key: &str) -> bool {
+    match decode_len(auth_key, 32) {
+        Some(key) => constant_time_eq(&sha256(&key), &account.auth_hash),
+        None => false,
+    }
+}
+
+fn new_user_id() -> String {
+    let mut buf = [0u8; 8];
+    getrandom::fill(&mut buf).expect("OS randomness available");
+    buf.iter().map(|b| ID_ALPHABET[(b & 31) as usize] as char).collect()
+}
+
+pub fn random_token(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    getrandom::fill(&mut buf).expect("OS randomness available");
+    B64URL.encode(buf)
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket session
 // ---------------------------------------------------------------------------
 
-async fn send_text(socket: &mut WebSocket, msg: &ServerMsg<'_>) -> Result<()> {
-    socket.send(Message::Text(msg.json().into())).await?;
+async fn send_text(socket: &mut WebSocket, text: String) -> Result<()> {
+    socket.send(Message::Text(text.into())).await?;
     Ok(())
 }
 
@@ -382,105 +670,120 @@ async fn recv_client(socket: &mut WebSocket) -> Result<Option<ClientMsg>> {
     }
 }
 
-/// Names reach other clients as object keys; keep them boring.
-const RESERVED_NAMES: &[&str] = &["constructor", "prototype", "hasownproperty", "isprototypeof", "tostring", "valueof"];
-
-fn valid_name(name: &str) -> bool {
-    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    (2..=32).contains(&name.len())
-        && name.bytes().next().is_some_and(alnum)
-        && name.bytes().all(|b| alnum(b) || b == b'_' || b == b'-' || b == b'.')
-        && !RESERVED_NAMES.contains(&name)
+struct Authed {
+    id: String,
+    username: String,
+    cursor: i64,
+    /// Sent with the welcome message: token (new sessions) and locked keys (login).
+    welcome: Value,
 }
 
-/// Slows down guessing invite codes and keys.
-async fn fail_slowly(socket: &mut WebSocket, message: &'static str) -> Result<()> {
+/// Slows down password guessing, and counts the failure against the IP.
+async fn fail_auth(socket: &mut WebSocket, state: &AppState, ip: IpAddr, message: &str) -> Result<()> {
+    state.auth_failures.hit(ip);
     tokio::time::sleep(Duration::from_secs(1)).await;
-    send_text(socket, &ServerMsg::Error { message }).await
+    send_text(socket, err(0, message)).await
 }
 
-fn decode_32(s: &str) -> Option<[u8; 32]> {
-    B64.decode(s).ok()?.try_into().ok()
-}
-
-fn verify_auth(sign_pk: &str, nonce: &str, sig: &str) -> bool {
-    let Some(pk) = decode_32(sign_pk).and_then(|b| VerifyingKey::from_bytes(&b).ok()) else {
-        return false;
-    };
-    let Some(sig) = B64
-        .decode(sig)
-        .ok()
-        .and_then(|b| <[u8; 64]>::try_from(b).ok())
-        .map(|b| Signature::from_bytes(&b))
-    else {
-        return false;
-    };
-    pk.verify_strict(format!("{AUTH_CONTEXT}{nonce}").as_bytes(), &sig).is_ok()
-}
-
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-/// Runs the auth handshake. Returns the authenticated user name.
-async fn authenticate(socket: &mut WebSocket, state: &AppState) -> Result<Option<String>> {
-    let nonce = random_token(32);
-    send_text(socket, &ServerMsg::Challenge { nonce: nonce.clone() }).await?;
-
-    let reply = tokio::time::timeout(Duration::from_secs(30), recv_client(socket)).await;
-    let Ok(Ok(Some(msg))) = reply else {
-        return Ok(None);
-    };
-    let fail = |m: &'static str| ServerMsg::Error { message: m };
-    match msg {
-        ClientMsg::Register { name, invite, sign_pk, enc_pk, sig } => {
-            if !constant_time_eq(invite.trim(), &state.invite) {
-                fail_slowly(socket, "Wrong invite code").await?;
-                return Ok(None);
-            }
-            if !valid_name(&name) {
-                send_text(socket, &fail("Name must be 2-32 chars (a-z, 0-9, _ . -) and start with a letter or digit"))
-                    .await?;
-                return Ok(None);
-            }
-            if decode_32(&enc_pk).is_none() || !verify_auth(&sign_pk, &nonce, &sig) {
-                send_text(socket, &fail("Invalid keys or signature")).await?;
-                return Ok(None);
-            }
-            let inserted = {
-                let db = state.db.lock().unwrap();
-                db.execute(
-                    "INSERT OR IGNORE INTO users(name, sign_pk, enc_pk) VALUES (?1, ?2, ?3)",
-                    params![name, sign_pk, enc_pk],
-                )?
-            };
-            if inserted == 0 {
-                send_text(socket, &fail("That name is already taken")).await?;
-                return Ok(None);
-            }
-            tracing::info!(user = %name, "registered");
-            let user = UserInfo { name: name.clone(), sign_pk, enc_pk, online: true };
-            state.broadcast(&ServerMsg::User { user }.json(), None);
-            Ok(Some(name))
+/// Runs the login handshake. Returns the authenticated user.
+async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> Result<Option<Authed>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    for _ in 0..5 {
+        let Ok(Ok(Some(msg))) = tokio::time::timeout_at(deadline, recv_client(socket)).await else {
+            return Ok(None);
+        };
+        if !state.auth_failures.allowed(ip) {
+            send_text(socket, err(0, "Too many failed attempts. Try again in a few minutes.")).await?;
+            return Ok(None);
         }
-        ClientMsg::Login { name, sig } => match state.user_keys(&name)? {
-            Some((sign_pk, _)) if verify_auth(&sign_pk, &nonce, &sig) => Ok(Some(name)),
-            _ => {
-                fail_slowly(socket, "Unknown user or bad signature").await?;
-                Ok(None)
+        match msg {
+            ClientMsg::Prelogin { username, .. } => {
+                let salt = match state.account_by_username(&username)? {
+                    Some(a) => a.salt,
+                    None => state.fake_salt(&username),
+                };
+                send_text(socket, json!({"type": "prelogin", "salt": salt}).to_string()).await?;
             }
-        },
-        _ => {
-            send_text(socket, &fail("Log in first")).await?;
-            Ok(None)
+            ClientMsg::Register { username, salt, auth_key, sign_pk, enc_pk, bundle } => {
+                if !valid_username(&username) {
+                    send_text(socket, err(0, "Username must be 3-24 characters: a-z, 0-9, _ and .")).await?;
+                    return Ok(None);
+                }
+                let keys_ok = decode_len(&salt, 16).is_some()
+                    && decode_len(&sign_pk, 32).is_some()
+                    && decode_len(&enc_pk, 32).is_some()
+                    && bundle.len() <= MAX_BUNDLE_BYTES;
+                let Some(auth) = decode_len(&auth_key, 32).filter(|_| keys_ok) else {
+                    send_text(socket, err(0, "Invalid registration data")).await?;
+                    return Ok(None);
+                };
+                if !state.registrations.allowed(ip) {
+                    send_text(socket, err(0, "Too many new accounts from your network. Try again later.")).await?;
+                    return Ok(None);
+                }
+                let id = {
+                    let db = state.db.lock().unwrap();
+                    let mut created = None;
+                    for _ in 0..5 {
+                        let id = new_user_id();
+                        let n = db.execute(
+                            "INSERT INTO accounts(id, username, sign_pk, enc_pk, salt, auth_hash, bundle)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT DO NOTHING",
+                            params![id, username, sign_pk, enc_pk, salt, sha256(&auth), bundle],
+                        )?;
+                        if n == 1 {
+                            created = Some(id);
+                            break;
+                        }
+                        let taken: bool = db
+                            .query_row("SELECT 1 FROM accounts WHERE username = ?1", [&username], |_| Ok(()))
+                            .optional()?
+                            .is_some();
+                        if taken {
+                            break;
+                        }
+                    }
+                    created
+                };
+                let Some(id) = id else {
+                    send_text(socket, err(0, "That username is taken")).await?;
+                    return Ok(None);
+                };
+                state.registrations.hit(ip);
+                tracing::info!(user = %id, "registered");
+                let token = state.create_session(&id)?;
+                return Ok(Some(Authed { id, username, cursor: 0, welcome: json!({"token": token}) }));
+            }
+            ClientMsg::Login { username, auth_key, cursor } => {
+                let account = state.account_by_username(&username)?;
+                let Some(a) = account.filter(|a| auth_matches(a, &auth_key)) else {
+                    fail_auth(socket, state, ip, "Wrong username or password").await?;
+                    return Ok(None);
+                };
+                let token = state.create_session(&a.id)?;
+                let welcome = json!({"token": token, "bundle": a.bundle, "salt": a.salt});
+                return Ok(Some(Authed { id: a.id, username: a.username, cursor, welcome }));
+            }
+            ClientMsg::Resume { token, cursor } => {
+                let Some((id, username)) = state.resume_session(&token)? else {
+                    fail_auth(socket, state, ip, "Session expired. Sign in again.").await?;
+                    return Ok(None);
+                };
+                return Ok(Some(Authed { id, username, cursor, welcome: json!({}) }));
+            }
+            _ => {
+                send_text(socket, err(0, "Sign in first")).await?;
+                return Ok(None);
+            }
         }
     }
+    Ok(None)
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, permit: OwnedSemaphorePermit) -> Result<()> {
-    let me = authenticate(&mut socket, &state).await;
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, permit: OwnedSemaphorePermit, ip: IpAddr) -> Result<()> {
+    let authed = authenticate(&mut socket, &state, ip).await;
     drop(permit);
-    let Some(me) = me? else {
+    let Some(me) = authed? else {
         let _ = socket.send(Message::Close(None)).await;
         return Ok(());
     };
@@ -489,29 +792,35 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, permit: Owne
     let (kick, mut kicked) = oneshot::channel();
     let budget = Arc::new(Semaphore::new(MAX_SESSION_BACKLOG));
     let session_id = state.next_session.fetch_add(1, Ordering::Relaxed);
-    let old = state
-        .online
-        .lock()
-        .unwrap()
-        .insert(me.clone(), Session { id: session_id, tx, budget, kick });
-    if let Some(old) = old {
-        let _ = old.kick.send("Signed in from another window");
+    let came_online = {
+        let mut online = state.online.lock().unwrap();
+        let list = online.entry(me.id.clone()).or_default();
+        list.push(Session { id: session_id, tx, budget, kick: Some(kick) });
+        list.len() == 1
+    };
+    if came_online {
+        state.presence_changed(&me.id, true);
     }
 
-    let result = run_session(&mut socket, &state, &me, &mut rx, &mut kicked).await;
+    let result = run_session(&mut socket, &state, &me, session_id, &mut rx, &mut kicked).await;
 
-    // Only clean up if we are still the active session for this user.
-    let removed = {
+    let went_offline = {
         let mut online = state.online.lock().unwrap();
-        if online.get(&me).is_some_and(|s| s.id == session_id) {
-            online.remove(&me);
-            true
-        } else {
-            false
+        match online.get_mut(&me.id) {
+            Some(list) => {
+                let before = list.len();
+                list.retain(|s| s.id != session_id);
+                let removed = list.len() < before;
+                if list.is_empty() {
+                    online.remove(&me.id);
+                }
+                removed && !online.contains_key(&me.id)
+            }
+            None => false,
         }
     };
-    if removed {
-        state.broadcast(&ServerMsg::Presence { name: &me, online: false }.json(), None);
+    if went_offline {
+        state.presence_changed(&me.id, false);
     }
     result
 }
@@ -519,39 +828,45 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, permit: Owne
 async fn run_session(
     socket: &mut WebSocket,
     state: &AppState,
-    me: &str,
+    me: &Authed,
+    session_id: u64,
     rx: &mut mpsc::UnboundedReceiver<(String, OwnedSemaphorePermit)>,
     kicked: &mut oneshot::Receiver<&'static str>,
 ) -> Result<()> {
-    send_text(socket, &ServerMsg::Welcome { name: me }).await?;
-    send_text(socket, &ServerMsg::Directory { users: state.directory()? }).await?;
-    state.broadcast(&ServerMsg::Presence { name: me, online: true }.json(), Some(me));
+    let mut welcome = me.welcome.clone();
+    welcome["type"] = json!("welcome");
+    welcome["me"] = json!({"id": me.id, "username": me.username});
+    welcome["vault"] = json!(state.vault_of(&me.id)?);
+    send_text(socket, welcome.to_string()).await?;
+    send_text(socket, state.friends_snapshot(&me.id)?).await?;
 
-    // Flush anything that arrived while we were offline, a page at a time. Envelopes
-    // that arrive meanwhile are both queued and pushed live; the client dedupes them.
-    let mut after = 0i64;
+    // Catch up on everything stored since this device's cursor, a page at a time.
+    // Envelopes that arrive meanwhile are queued on `rx`; the client skips any
+    // with a seq it has already seen.
+    let mut after = me.cursor.max(0);
     loop {
         let page: Vec<(i64, String)> = {
             let db = state.db.lock().unwrap();
             let mut stmt = db.prepare_cached(
-                "SELECT id, envelope FROM queue WHERE recipient = ?1 AND id > ?2 ORDER BY id LIMIT ?3",
+                "SELECT m.id, m.envelope FROM inbox i JOIN messages m ON m.id = i.msg_id
+                 WHERE i.user_id = ?1 AND i.msg_id > ?2 ORDER BY i.msg_id LIMIT ?3",
             )?;
-            stmt.query_map(params![me, after, DELIVERY_PAGE], |r| Ok((r.get(0)?, r.get(1)?)))?
+            stmt.query_map(params![me.id, after, SYNC_PAGE], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?
         };
         let Some(&(last, _)) = page.last() else { break };
         after = last;
-        for (qid, env) in page {
-            let envelope: Value = serde_json::from_str(&env)?;
-            send_text(socket, &ServerMsg::Deliver { qid, envelope: &envelope }).await?;
+        for (seq, env) in page {
+            send_text(socket, format!(r#"{{"type":"deliver","seq":{seq},"envelope":{env}}}"#)).await?;
         }
     }
+    send_text(socket, json!({"type": "synced", "seq": after}).to_string()).await?;
 
     loop {
         tokio::select! {
             reason = &mut *kicked => {
                 let message = reason.unwrap_or("Disconnected");
-                let _ = send_text(socket, &ServerMsg::Error { message }).await;
+                let _ = send_text(socket, err(0, message)).await;
                 let _ = socket.send(Message::Close(None)).await;
                 return Ok(());
             },
@@ -561,71 +876,243 @@ async fn run_session(
             },
             msg = recv_client(socket) => {
                 let Some(msg) = msg? else { return Ok(()) };
-                handle_client_msg(socket, state, me, msg).await?;
+                if !handle_client_msg(socket, state, me, session_id, msg).await? {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return Ok(());
+                }
             }
         }
     }
 }
 
-async fn handle_client_msg(socket: &mut WebSocket, state: &AppState, me: &str, msg: ClientMsg) -> Result<()> {
+/// Handles one message from a signed-in client. Returns false to end the session.
+async fn handle_client_msg(
+    socket: &mut WebSocket,
+    state: &AppState,
+    me: &Authed,
+    session_id: u64,
+    msg: ClientMsg,
+) -> Result<bool> {
+    let my = me.id.as_str();
     match msg {
-        ClientMsg::Ping => send_text(socket, &ServerMsg::Pong).await,
-        ClientMsg::Ack { qids } => {
-            let db = state.db.lock().unwrap();
-            let mut stmt = db.prepare_cached("DELETE FROM queue WHERE id = ?1 AND recipient = ?2")?;
-            for qid in qids {
-                stmt.execute(params![qid, me])?;
-            }
-            Ok(())
+        ClientMsg::Ping => send_text(socket, json!({"type": "pong"}).to_string()).await?,
+
+        ClientMsg::FriendRequest { req, id } => {
+            let id: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_uppercase();
+            let reply = friend_request(state, my, &id)?;
+            send_text(socket, reply.map_or_else(|e| err(req, e), |()| ok(req))).await?;
         }
+        ClientMsg::FriendAccept { req, id } => {
+            let accepted = {
+                let mut db = state.db.lock().unwrap();
+                let tx = db.transaction()?;
+                let n = tx.execute("DELETE FROM friend_requests WHERE from_id = ?1 AND to_id = ?2", [&id, my])?;
+                if n == 1 {
+                    tx.execute("DELETE FROM friend_requests WHERE from_id = ?1 AND to_id = ?2", [my, &id])?;
+                    tx.execute("INSERT OR IGNORE INTO friends(a, b) VALUES (?1, ?2), (?2, ?1)", [my, &id])?;
+                }
+                tx.commit()?;
+                n == 1
+            };
+            if accepted {
+                state.push_friends_snapshot(my);
+                state.push_friends_snapshot(&id);
+                send_text(socket, ok(req)).await?;
+            } else {
+                send_text(socket, err(req, "That friend request no longer exists")).await?;
+            }
+        }
+        ClientMsg::FriendDecline { req, id } => {
+            {
+                let db = state.db.lock().unwrap();
+                db.execute(
+                    "DELETE FROM friend_requests WHERE (from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)",
+                    [my, &id],
+                )?;
+            }
+            state.push_friends_snapshot(my);
+            state.push_friends_snapshot(&id);
+            send_text(socket, ok(req)).await?;
+        }
+        ClientMsg::FriendRemove { req, id } => {
+            {
+                let db = state.db.lock().unwrap();
+                db.execute("DELETE FROM friends WHERE (a = ?1 AND b = ?2) OR (a = ?2 AND b = ?1)", [my, &id])?;
+            }
+            state.push_friends_snapshot(my);
+            state.push_friends_snapshot(&id);
+            send_text(socket, ok(req)).await?;
+        }
+
+        ClientMsg::Lookup { req, ids } => {
+            let ids: Vec<String> = ids.into_iter().filter(|i| valid_user_id(i)).take(MAX_RECIPIENTS).collect();
+            let users = state.users(&ids)?;
+            send_text(socket, json!({"type": "users", "req": req, "users": users}).to_string()).await?;
+        }
+
         ClientMsg::Send { envelope } => {
             let meta: EnvelopeMeta = match serde_json::from_value(envelope.clone()) {
                 Ok(m) => m,
-                Err(_) => return send_text(socket, &ServerMsg::Error { message: "Malformed envelope" }).await,
+                Err(_) => {
+                    send_text(socket, err(0, "Malformed envelope")).await?;
+                    return Ok(true);
+                }
             };
-            let id = meta.id.as_str();
-            let failed = |message| ServerMsg::Failed { id, message };
-            if meta.from != me {
-                return send_text(socket, &failed("Envelope sender mismatch")).await;
+            let failed = |message: &str| json!({"type": "failed", "id": meta.id, "message": message}).to_string();
+            if meta.from != my {
+                send_text(socket, failed("Envelope sender mismatch")).await?;
+                return Ok(true);
             }
-            let recipients: HashSet<&str> = meta.keys.iter().map(|k| k.to.as_str()).filter(|n| *n != me).collect();
+            let recipients: HashSet<&str> = meta.keys.iter().map(|k| k.to.as_str()).collect();
+            if recipients.is_empty() || recipients.len() > MAX_RECIPIENTS || !recipients.iter().all(|r| valid_user_id(r)) {
+                send_text(socket, failed("Invalid recipients")).await?;
+                return Ok(true);
+            }
             let env_text = serde_json::to_string(&envelope)?;
             let size = env_text.len() as i64;
-            for r in &recipients {
-                if state.user_keys(r)?.is_none() {
-                    return send_text(socket, &failed("Unknown recipient")).await;
-                }
-                if state.mailbox_bytes(r)? + size > MAX_MAILBOX_BYTES {
-                    return send_text(socket, &failed("A recipient's mailbox is full. Try again after they come online."))
-                        .await;
-                }
-            }
-            let mut deliveries = Vec::with_capacity(recipients.len());
-            {
+            let seq = {
                 let mut db = state.db.lock().unwrap();
                 let tx = db.transaction()?;
-                {
-                    let mut stmt = tx.prepare_cached("INSERT INTO queue(recipient, envelope, size) VALUES (?1, ?2, ?3)")?;
-                    for r in &recipients {
-                        stmt.execute(params![r, env_text, size])?;
-                        deliveries.push((*r, tx.last_insert_rowid()));
+                let used: i64 =
+                    tx.query_row("SELECT coalesce(sum(size), 0) FROM messages WHERE sender = ?1", [my], |r| r.get(0))?;
+                if used + size > MAX_USER_STORAGE {
+                    None
+                } else {
+                    let mut known = 0;
+                    {
+                        let mut stmt = tx.prepare_cached("SELECT 1 FROM accounts WHERE id = ?1")?;
+                        for r in &recipients {
+                            if stmt.exists([r])? {
+                                known += 1;
+                            }
+                        }
+                    }
+                    if known != recipients.len() {
+                        Some(Err("Unknown recipient"))
+                    } else {
+                        tx.execute(
+                            "INSERT INTO messages(sender, envelope, size) VALUES (?1, ?2, ?3)",
+                            params![my, env_text, size],
+                        )?;
+                        let seq = tx.last_insert_rowid();
+                        {
+                            let mut stmt = tx.prepare_cached("INSERT INTO inbox(user_id, msg_id) VALUES (?1, ?2)")?;
+                            for r in &recipients {
+                                stmt.execute(params![r, seq])?;
+                            }
+                        }
+                        tx.commit()?;
+                        Some(Ok(seq))
                     }
                 }
-                tx.commit()?;
+            };
+            match seq {
+                None => {
+                    send_text(socket, failed("You've used all your message storage. Old messages expire over time."))
+                        .await?
+                }
+                Some(Err(e)) => send_text(socket, failed(e)).await?,
+                Some(Ok(seq)) => {
+                    let text = format!(r#"{{"type":"deliver","seq":{seq},"envelope":{env_text}}}"#);
+                    for r in &recipients {
+                        state.push_user(r, &text, None);
+                    }
+                    send_text(socket, json!({"type": "sent", "id": meta.id, "seq": seq}).to_string()).await?;
+                }
             }
-            for (r, qid) in deliveries {
-                state.send_to(r, ServerMsg::Deliver { qid, envelope: &envelope }.json());
-            }
-            send_text(socket, &ServerMsg::Sent { id: &meta.id }).await
         }
-        ClientMsg::Register { .. } | ClientMsg::Login { .. } => {
-            send_text(socket, &ServerMsg::Error { message: "Already logged in" }).await
+
+        ClientMsg::VaultPut { req, vault } => {
+            if vault.len() > MAX_VAULT_BYTES {
+                send_text(socket, err(req, "Settings are too large to sync")).await?;
+                return Ok(true);
+            }
+            {
+                let db = state.db.lock().unwrap();
+                db.execute("UPDATE accounts SET vault = ?1 WHERE id = ?2", params![vault, my])?;
+            }
+            state.push_user(my, &json!({"type": "vault", "vault": vault}).to_string(), Some(session_id));
+            send_text(socket, ok(req)).await?;
+        }
+
+        ClientMsg::Password { req, auth_key, new_salt, new_auth_key, bundle } => {
+            let account = state.account_by_username(&me.username)?;
+            if !account.is_some_and(|a| auth_matches(&a, &auth_key)) {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                send_text(socket, err(req, "Current password is wrong")).await?;
+                return Ok(true);
+            }
+            let Some(new_auth) = decode_len(&new_auth_key, 32)
+                .filter(|_| decode_len(&new_salt, 16).is_some() && bundle.len() <= MAX_BUNDLE_BYTES)
+            else {
+                send_text(socket, err(req, "Invalid data")).await?;
+                return Ok(true);
+            };
+            {
+                let db = state.db.lock().unwrap();
+                db.execute(
+                    "UPDATE accounts SET salt = ?1, auth_hash = ?2, bundle = ?3 WHERE id = ?4",
+                    params![new_salt, sha256(&new_auth), bundle, my],
+                )?;
+            }
+            send_text(socket, ok(req)).await?;
+        }
+
+        ClientMsg::Logout => {
+            // Only this device's session ends; other devices stay signed in.
+            if let Some(token) = me.welcome.get("token").and_then(Value::as_str) {
+                let db = state.db.lock().unwrap();
+                db.execute("DELETE FROM sessions WHERE token_hash = ?1", [sha256(token.as_bytes())])?;
+            }
+            return Ok(false);
+        }
+
+        ClientMsg::Prelogin { req, .. } => {
+            let salt: String = {
+                let db = state.db.lock().unwrap();
+                db.query_row("SELECT salt FROM accounts WHERE id = ?1", [my], |r| r.get(0))?
+            };
+            send_text(socket, json!({"type": "prelogin", "req": req, "salt": salt}).to_string()).await?
+        }
+        ClientMsg::Register { .. } | ClientMsg::Login { .. } | ClientMsg::Resume { .. } => {
+            send_text(socket, err(0, "Already signed in")).await?
         }
     }
+    Ok(true)
 }
 
-pub fn random_token(bytes: usize) -> String {
-    let mut buf = vec![0u8; bytes];
-    getrandom::fill(&mut buf).expect("OS randomness available");
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+fn friend_request(state: &AppState, me: &str, to: &str) -> Result<std::result::Result<(), &'static str>> {
+    if !valid_user_id(to) {
+        return Ok(Err("That doesn't look like a user ID (8 letters and digits)"));
+    }
+    if to == me {
+        return Ok(Err("That's your own ID"));
+    }
+    if state.username_of(to)?.is_none() {
+        return Ok(Err("No user with that ID"));
+    }
+    if state.are_friends(me, to)? {
+        return Ok(Err("You're already friends"));
+    }
+    {
+        let mut db = state.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let reverse = tx.execute("DELETE FROM friend_requests WHERE from_id = ?1 AND to_id = ?2", [to, me])?;
+        if reverse == 1 {
+            // They already asked us: that's a yes from both sides.
+            tx.execute("DELETE FROM friend_requests WHERE from_id = ?1 AND to_id = ?2", [me, to])?;
+            tx.execute("INSERT OR IGNORE INTO friends(a, b) VALUES (?1, ?2), (?2, ?1)", [me, to])?;
+        } else {
+            let pending: i64 =
+                tx.query_row("SELECT count(*) FROM friend_requests WHERE from_id = ?1", [me], |r| r.get(0))?;
+            if pending >= MAX_PENDING_REQUESTS {
+                return Ok(Err("You have too many pending friend requests"));
+            }
+            tx.execute("INSERT OR IGNORE INTO friend_requests(from_id, to_id) VALUES (?1, ?2)", [me, to])?;
+        }
+        tx.commit()?;
+    }
+    state.push_friends_snapshot(me);
+    state.push_friends_snapshot(to);
+    Ok(Ok(()))
 }

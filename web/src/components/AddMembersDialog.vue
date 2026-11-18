@@ -9,6 +9,9 @@ import {
 import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
+
+const friendList = () =>
+  Object.values(chat.state.contacts).filter((c) => c.friend).sort((a, b) => a.name.localeCompare(b.name))
 import type { Group } from '@/lib/types'
 
 const props = defineProps<{ group: Group }>()
@@ -16,9 +19,7 @@ const open = defineModel<boolean>('open', { required: true })
 
 const selected = ref<string[]>([])
 const busy = ref(false)
-const candidates = computed(() =>
-  Object.keys(chat.state.contacts).filter((n) => !props.group.members.includes(n)).sort(),
-)
+const candidates = computed(() => friendList().filter((f) => !props.group.members.includes(f.id)))
 
 watch(open, (o) => {
   if (o) selected.value = []
@@ -51,11 +52,11 @@ async function submit() {
           <DialogDescription>New members will be able to read messages sent after they join.</DialogDescription>
         </DialogHeader>
         <div class="well max-h-60 space-y-0.5 overflow-y-auto rounded-2xl p-1.5">
-          <p v-if="!candidates.length" class="p-2 text-xs text-muted-foreground">Everyone is already in this group.</p>
-          <label v-for="n in candidates" :key="n" class="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-1.5 text-sm transition-colors hover:bg-hover">
-            <UserAvatar :name="n" :size="28" />
-            <span class="flex-1 font-medium">{{ n }}</span>
-            <Checkbox :model-value="selected.includes(n)" @update:model-value="toggle(n, $event)" />
+          <p v-if="!candidates.length" class="p-2 text-xs text-muted-foreground">All your friends are already in this group.</p>
+          <label v-for="f in candidates" :key="f.id" class="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-1.5 text-sm transition-colors hover:bg-hover">
+            <UserAvatar :name="f.name" :id="f.id" :size="28" />
+            <span class="flex-1 font-medium">{{ f.name }}</span>
+            <Checkbox :model-value="selected.includes(f.id)" @update:model-value="toggle(f.id, $event)" />
           </label>
         </div>
         <DialogFooter>

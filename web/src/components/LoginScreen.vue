@@ -1,88 +1,63 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { AtSign, Globe, KeyRound, Loader2, Lock, Moon, Sun, Trash2 } from 'lucide-vue-next'
-import { toast } from 'vue-sonner'
-import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import UserAvatar from '@/components/UserAvatar.vue'
+import { computed, ref } from 'vue'
+import { AtSign, Globe, Loader2, Lock, LockKeyhole, Moon, Sun, TriangleAlert } from 'lucide-vue-next'
 import { chat } from '@/lib/chat'
-import { errMsg, hostOf } from '@/lib/format'
+import { errMsg } from '@/lib/format'
 import { isDark, toggleTheme } from '@/lib/theme'
-import type { Account } from '@/lib/types'
+import { MIN_PASSWORD } from '@/lib/types'
 
-const accounts = ref<Account[]>([])
-const tab = ref<'signin' | 'create'>('create')
+const tab = ref<'signin' | 'create'>('signin')
 const server = ref('')
-const name = ref('')
-const invite = ref('')
-const creating = ref(false)
-const createError = ref('')
-const signingIn = ref<string | null>(null)
-const loginError = ref('')
-const forgetTarget = ref<Account | null>(null)
-const forgetOpen = ref(false)
-const forgetting = ref(false)
+const username = ref('')
+const password = ref('')
+const confirm = ref('')
+const busy = ref(false)
+const error = ref('')
 
-const keyOf = (a: Account) => `${a.name}@${a.server}`
-
-async function refresh() {
-  try {
-    accounts.value = await chat.listAccounts()
-    if (!accounts.value.length) tab.value = 'create'
-  } catch (e) {
-    toast.error(errMsg(e))
-  }
+try {
+  server.value = chat.defaultServer()
+  username.value = chat.lastUsername()
+} catch {
+  /* prefill is best-effort */
 }
 
-onMounted(async () => {
-  try {
-    server.value = chat.defaultServer()
-  } catch (e) {
-    toast.error(errMsg(e))
-  }
-  await refresh()
-  if (accounts.value.length) tab.value = 'signin'
-})
+const USERNAME_RE = /^[a-z0-9_.]{3,24}$/
+const serverUrl = computed(() => (chat.isDesktop ? server.value.trim() : chat.defaultServer()))
+const mismatch = computed(() => tab.value === 'create' && confirm.value !== '' && confirm.value !== password.value)
+const tooShort = computed(() => tab.value === 'create' && password.value !== '' && password.value.length < MIN_PASSWORD)
 
-async function signIn(acc: Account) {
-  signingIn.value = keyOf(acc)
-  loginError.value = ''
+function switchTab(t: 'signin' | 'create') {
+  tab.value = t
+  error.value = ''
+}
+
+async function submit() {
+  error.value = ''
+  const name = username.value.trim().toLowerCase()
+  if (!USERNAME_RE.test(name)) {
+    error.value = 'Username must be 3-24 characters: a-z, 0-9, _ or .'
+    return
+  }
+  if (tab.value === 'create') {
+    if (password.value.length < MIN_PASSWORD) {
+      error.value = `Password must be at least ${MIN_PASSWORD} characters.`
+      return
+    }
+    if (password.value !== confirm.value) {
+      error.value = 'Passwords do not match.'
+      return
+    }
+  }
+  busy.value = true
   try {
-    await chat.login(acc)
+    if (tab.value === 'create') await chat.register(serverUrl.value, name, password.value)
+    else await chat.login(serverUrl.value, name, password.value)
+    password.value = ''
+    confirm.value = ''
   } catch (e) {
-    loginError.value = errMsg(e)
+    error.value = errMsg(e)
   } finally {
-    signingIn.value = null
-  }
-}
-
-function askForget(acc: Account) {
-  forgetTarget.value = acc
-  forgetOpen.value = true
-}
-
-async function doForget() {
-  if (!forgetTarget.value) return
-  forgetting.value = true
-  try {
-    await chat.forgetAccount(forgetTarget.value)
-    forgetOpen.value = false
-    await refresh()
-  } catch (e) {
-    toast.error(errMsg(e))
-  } finally {
-    forgetting.value = false
-  }
-}
-
-async function create() {
-  creating.value = true
-  createError.value = ''
-  try {
-    await chat.createAccount(server.value.trim(), name.value.trim(), invite.value.trim())
-  } catch (e) {
-    createError.value = errMsg(e)
-  } finally {
-    creating.value = false
+    busy.value = false
   }
 }
 </script>
@@ -107,7 +82,6 @@ async function create() {
         </div>
 
         <div class="dialog rounded-[2rem] p-5 sm:p-6">
-          <!-- segmented control -->
           <div class="relative mb-5 grid grid-cols-2 rounded-2xl bg-inset p-1 shadow-[inset_0_0_0_1px_var(--line)]" role="tablist">
             <span
               class="absolute inset-y-1 left-1 w-[calc(50%-0.25rem)] rounded-xl bg-card shadow-[var(--shadow-sm),inset_0_0_0_1px_var(--line)] transition-transform duration-300 ease-out"
@@ -115,45 +89,19 @@ async function create() {
             />
             <button
               v-for="t in ([['signin', 'Sign in'], ['create', 'Create account']] as const)" :key="t[0]"
-              role="tab" :aria-selected="tab === t[0]"
+              role="tab" :aria-selected="tab === t[0]" :disabled="busy"
               class="relative z-10 rounded-xl px-3 py-2 text-sm font-semibold outline-none transition-colors focus-visible:shadow-[var(--glow)]"
               :class="tab === t[0] ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'"
-              @click="tab = t[0]"
+              @click="switchTab(t[0])"
             >{{ t[1] }}</button>
           </div>
 
-          <div v-if="tab === 'signin'" class="space-y-2.5">
-            <p v-if="!accounts.length" class="py-8 text-center text-sm text-muted-foreground">
-              No accounts saved on this device yet.<br>
-              <button class="mt-1 font-semibold text-primary hover:underline" @click="tab = 'create'">Create one</button>
-            </p>
-            <div
-              v-for="acc in accounts"
-              :key="keyOf(acc)"
-              class="well flex items-center gap-3 rounded-2xl p-2.5 transition-colors hover:bg-hover"
-            >
-              <UserAvatar :name="acc.name" :size="42" />
-              <div class="min-w-0 flex-1 leading-tight">
-                <div class="truncate text-[15px] font-semibold">{{ acc.name }}</div>
-                <div class="mt-0.5 truncate text-xs text-muted-foreground">{{ hostOf(acc.server) }}</div>
-              </div>
-              <button class="btn btn-ghost btn-icon btn-sm hover:!text-destructive" title="Forget this account" aria-label="Forget this account" @click="askForget(acc)">
-                <Trash2 />
-              </button>
-              <button class="btn btn-primary btn-sm" :disabled="signingIn !== null" @click="signIn(acc)">
-                <Loader2 v-if="signingIn === keyOf(acc)" class="animate-spin" />
-                Sign in
-              </button>
-            </div>
-            <p v-if="loginError" class="rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{{ loginError }}</p>
-          </div>
-
-          <form v-else class="space-y-4" @submit.prevent="create">
-            <div>
+          <form class="space-y-4" @submit.prevent="submit">
+            <div v-if="chat.isDesktop">
               <label class="label" for="server">Server URL</label>
               <div class="field-icon">
                 <Globe />
-                <input id="server" v-model="server" class="field" type="url" placeholder="https://chat.example.com" required autocomplete="off">
+                <input id="server" v-model="server" class="field" type="url" placeholder="https://chat.example.com" required autocomplete="off" :disabled="busy">
               </div>
             </div>
             <div>
@@ -161,23 +109,44 @@ async function create() {
               <div class="field-icon">
                 <AtSign />
                 <input
-                  id="username" v-model="name" class="field" required minlength="2" maxlength="32" placeholder="yourname"
-                  pattern="[a-z0-9_.\-]{2,32}" autocomplete="off" autocapitalize="off"
+                  id="username" v-model="username" class="field" required minlength="3" maxlength="24" placeholder="yourname"
+                  pattern="[a-z0-9_.]{3,24}" autocomplete="username" autocapitalize="off" spellcheck="false" :disabled="busy"
                 >
               </div>
-              <p class="mt-1.5 text-xs text-muted-foreground">Lowercase a-z 0-9 _ . - , 2-32 characters.</p>
+              <p v-if="tab === 'create'" class="mt-1.5 text-xs text-muted-foreground">3-24 characters: a-z, 0-9, _ and .</p>
             </div>
             <div>
-              <label class="label" for="invite">Invite code</label>
+              <label class="label" for="password">Password</label>
               <div class="field-icon">
-                <KeyRound />
-                <input id="invite" v-model="invite" class="field" required autocomplete="off" placeholder="Ask the server admin">
+                <LockKeyhole />
+                <input
+                  id="password" v-model="password" class="field" type="password" required :disabled="busy"
+                  :autocomplete="tab === 'create' ? 'new-password' : 'current-password'"
+                  :minlength="tab === 'create' ? MIN_PASSWORD : undefined" :placeholder="tab === 'create' ? `At least ${MIN_PASSWORD} characters` : 'Your password'"
+                >
               </div>
+              <p v-if="tooShort" class="mt-1.5 text-xs text-destructive">{{ password.length }} / {{ MIN_PASSWORD }} characters</p>
             </div>
-            <p v-if="createError" class="rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{{ createError }}</p>
-            <button type="submit" class="btn btn-primary !h-12 w-full !rounded-2xl !text-[15px]" :disabled="creating">
-              <Loader2 v-if="creating" class="animate-spin" />
-              Create account
+            <div v-if="tab === 'create'">
+              <label class="label" for="confirm">Confirm password</label>
+              <div class="field-icon">
+                <LockKeyhole />
+                <input id="confirm" v-model="confirm" class="field" type="password" required autocomplete="new-password" placeholder="Repeat password" :disabled="busy">
+              </div>
+              <p v-if="mismatch" class="mt-1.5 text-xs text-destructive">Passwords do not match.</p>
+            </div>
+
+            <div v-if="tab === 'create'" class="flex items-start gap-2.5 rounded-2xl bg-[color-mix(in_oklab,oklch(0.8_0.15_85)_16%,transparent)] p-3 text-xs leading-relaxed shadow-[inset_0_0_0_1px_color-mix(in_oklab,oklch(0.8_0.15_85)_35%,transparent)]">
+              <TriangleAlert class="mt-0.5 size-4 shrink-0 text-[oklch(0.7_0.15_75)]" />
+              <span>Your password locks your encryption keys. It can't be reset. If you forget it, the account is lost.</span>
+            </div>
+
+            <p v-if="error" class="rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{{ error }}</p>
+
+            <button type="submit" class="btn btn-primary !h-12 w-full !rounded-2xl !text-[15px]" :disabled="busy">
+              <Loader2 v-if="busy" class="animate-spin" />
+              <template v-if="busy">{{ tab === 'create' ? 'Creating your keys…' : 'Unlocking your keys…' }}</template>
+              <template v-else>{{ tab === 'create' ? 'Create account' : 'Sign in' }}</template>
             </button>
           </form>
         </div>
@@ -188,14 +157,5 @@ async function create() {
         </p>
       </div>
     </div>
-
-    <ConfirmDialog
-      v-model:open="forgetOpen"
-      title="Forget this account?"
-      :description="`This deletes ${forgetTarget?.name ?? 'the account'}'s encryption keys and all message history from this device. Without a backup of the keys you will not be able to sign in again.`"
-      confirm-label="Forget account"
-      :loading="forgetting"
-      @confirm="doForget"
-    />
   </div>
 </template>

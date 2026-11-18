@@ -1,9 +1,10 @@
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use clap::Parser;
-use e2ee_chat_server::{AppState, router, serve};
+use e2ee_chat_server::{AppState, Config, router, serve};
 
-/// Blind relay server for e2ee-chat. It stores only public keys and encrypted blobs.
+/// Relay and mailbox server for e2ee-chat. It stores only public keys, password-locked
+/// key bundles and encrypted blobs; it can't read messages.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -16,12 +17,15 @@ struct Args {
     /// Directory for the SQLite database.
     #[arg(long, env = "DATA_DIR", default_value = "./data")]
     data_dir: PathBuf,
-    /// Invite code required to create an account. Generated and stored if not set.
-    #[arg(long, env = "INVITE_CODE")]
-    invite: Option<String>,
     /// Directory with the built web app (web/dist). Omit to run the API only.
     #[arg(long, env = "WEB_DIR")]
     web_dir: Option<PathBuf>,
+    /// Days to keep encrypted messages (so new devices can download history).
+    #[arg(long, env = "RETENTION_DAYS", default_value_t = 180)]
+    retention_days: i64,
+    /// Trust the X-Forwarded-For header (set when running behind a reverse proxy).
+    #[arg(long, env = "TRUST_PROXY", default_value_t = false)]
+    trust_proxy: bool,
 }
 
 #[tokio::main]
@@ -33,18 +37,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
-    let state = AppState::open(&args.data_dir.join("chat.db"), args.invite)?;
-    if state.invite_from_config() {
-        tracing::info!("using the invite code from INVITE_CODE");
-    } else {
-        tracing::info!("invite code: {}", state.invite_code());
-    }
+    let config = Config { retention_days: args.retention_days.max(1), trust_proxy: args.trust_proxy };
+    let state = AppState::open(&args.data_dir.join("chat.db"), config)?;
 
     let pruner = state.clone();
     tokio::spawn(async move {
         loop {
-            if let Ok(n @ 1..) = pruner.prune_queue() {
-                tracing::info!("dropped {n} expired undelivered messages");
+            match pruner.prune() {
+                Ok(n @ 1..) => tracing::info!("deleted {n} expired messages"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("prune failed: {e:#}"),
             }
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
