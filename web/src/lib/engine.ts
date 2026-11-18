@@ -757,7 +757,7 @@ function refreshConversations() {
   const list: Conversation[] = []
   const add = (id: ConvId, kind: 'dm' | 'group', title: string) => {
     const m = s.meta[id] ?? { unread: 0, lastTs: 0, preview: '' }
-    list.push({ id, kind, title, unread: m.unread, lastTs: m.lastTs, preview: m.preview })
+    list.push({ id, kind, title, unread: m.unread, lastTs: m.lastTs, preview: m.preview, muted: false, pinned: false, archived: false })
   }
   for (const g of Object.values(state.groups)) add(`g:${g.id}`, 'group', g.name)
   for (const c of Object.values(state.contacts)) {

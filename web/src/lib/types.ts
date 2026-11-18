@@ -87,6 +87,12 @@ export interface Conversation {
   lastTs: number
   /** Preview of the last message (plain text). */
   preview: string
+  /** No notifications or sound for this conversation. */
+  muted: boolean
+  /** Shown at the top of the list. */
+  pinned: boolean
+  /** Hidden from the main list (comes back on a new message unless muted). */
+  archived: boolean
 }
 
 export type ConnectionStatus = 'offline' | 'connecting' | 'online'
