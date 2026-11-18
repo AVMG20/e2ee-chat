@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { ref, shallowReactive, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
@@ -48,4 +48,20 @@ export function startEditLast(): boolean {
 }
 
 export type Draft = { doc: unknown; reply: ChatMessage | null }
-export const drafts = new Map<ConvId, Draft>()
+/** In-memory only (never persisted): unsent text and reply target per conversation. */
+export const drafts = shallowReactive(new Map<ConvId, Draft>())
+watch(() => chat.state.account, (a) => {
+  if (!a) {
+    drafts.clear()
+    replyTo.value = null
+  }
+})
+
+/** Message whose touch action sheet is open. */
+export const sheetMsg = ref<ChatMessage | null>(null)
+/** Id of the image message shown in the lightbox. */
+export const viewerId = ref<string | null>(null)
+
+const settled = (m: ChatMessage) => m.status !== 'failed' && m.status !== 'sending'
+export const canEditMsg = (m: ChatMessage) => m.from === myId() && settled(m) && m.kind === 'text'
+export const canDeleteMsg = (m: ChatMessage) => m.from === myId() && settled(m)

@@ -1,0 +1,55 @@
+// Desktop (Tauri) helpers. Tauri packages are imported lazily so the web bundle never loads them eagerly.
+
+export const isDesktop = '__TAURI_INTERNALS__' in globalThis
+
+const isWindows = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent)
+
+let lastBadge = -1
+
+/** Draws a small red dot with the count, as PNG bytes (for the Windows taskbar overlay). */
+async function overlayPng(count: number): Promise<Uint8Array | undefined> {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 32
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return undefined
+  ctx.fillStyle = '#e11d48'
+  ctx.beginPath()
+  ctx.arc(16, 16, 16, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.fillStyle = '#fff'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  const text = count > 99 ? '99+' : String(count)
+  ctx.font = `bold ${text.length > 2 ? 15 : text.length > 1 ? 20 : 24}px sans-serif`
+  ctx.fillText(text, 16, 17)
+  const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/png'))
+  return blob ? new Uint8Array(await blob.arrayBuffer()) : undefined
+}
+
+/** Shows the unread count on the app icon (dock/launcher badge, or taskbar overlay on Windows). No-op on the web. */
+export async function setUnreadBadge(count: number): Promise<void> {
+  if (!isDesktop || count === lastBadge) return
+  lastBadge = count
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const win = getCurrentWindow()
+    if (isWindows) await win.setOverlayIcon(count > 0 ? await overlayPng(count) : undefined)
+    else await win.setBadgeCount(count > 0 ? count : undefined)
+  } catch {
+    lastBadge = -1 // retry on the next change
+  }
+}
+
+/** Brings the main window to the front (also from the tray). */
+export async function focusWindow(): Promise<void> {
+  if (!isDesktop) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const win = getCurrentWindow()
+    await win.show()
+    await win.unminimize()
+    await win.setFocus()
+  } catch {
+    /* ignore */
+  }
+}

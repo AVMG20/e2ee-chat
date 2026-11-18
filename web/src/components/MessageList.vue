@@ -2,8 +2,10 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowDown } from 'lucide-vue-next'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import ImageViewer from '@/components/messages/ImageViewer.vue'
 import MessageItem from '@/components/MessageItem.vue'
-import { deleteMsg, deleteTarget, editingId, extra, flashId } from '@/components/messages/state'
+import MessageSheet from '@/components/messages/MessageSheet.vue'
+import { deleteMsg, deleteTarget, editingId, extra, flashId, sheetMsg, viewerId } from '@/components/messages/state'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { chat } from '@/lib/chat'
 import { formatDate } from '@/lib/format'
@@ -146,6 +148,8 @@ watch(() => chat.state.active, () => {
   editingId.value = null
   deleteTarget.value = null
   flashId.value = null
+  sheetMsg.value = null
+  viewerId.value = null
 })
 </script>
 
@@ -184,6 +188,8 @@ watch(() => chat.state.active, () => {
       </button>
     </Transition>
 
+    <MessageSheet />
+    <ImageViewer />
     <ConfirmDialog
       v-model:open="confirmOpen" title="Delete message?" confirm-label="Delete"
       description="This removes the message for everyone in the conversation. Tip: hold Shift while clicking delete to skip this prompt."

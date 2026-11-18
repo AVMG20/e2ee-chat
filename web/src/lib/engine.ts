@@ -31,6 +31,7 @@ import {
   type FriendRequest,
   type Group,
   type ReplyRef,
+  type SearchHit,
   MAX_FILE_BYTES,
   MIN_PASSWORD,
 } from './types'
@@ -43,8 +44,16 @@ type PayloadConv = { t: 'dm' } | { t: 'g'; id: string }
 type PayloadBody =
   | { t: 'text'; doc: JSONContent; reply?: ReplyRef }
   | { t: 'file'; name: string; mime: string; size: number; reply?: ReplyRef }
-  | { t: 'group'; id: string; name: string; members: string[] }
+  | { t: 'group'; id: string; name: string; members: string[]; admins?: string[] }
   | { t: 'leave'; id: string }
+  /** Group admin actions (only from admins; in groups without an admin list, from anyone). */
+  | { t: 'gname'; id: string; name: string }
+  | { t: 'gkick'; id: string; member: string }
+  | { t: 'gadmin'; id: string; member: string; on: boolean }
+  /** I've read the conversation up to this message time. Also syncs unread counts between my devices. */
+  | { t: 'read'; ts: number; with?: string }
+  /** My profile picture (the attachment; empty to remove it). Sent to all my contacts. */
+  | { t: 'profile'; mime: string }
   /** Only the author's own messages can be edited or deleted (checked on receipt). */
   | { t: 'edit'; target: string; doc: JSONContent }
   | { t: 'delete'; target: string }
@@ -117,9 +126,19 @@ function validHeader(h: PayloadHeader): boolean {
     case 'typing':
       return true
     case 'group':
-      return validGroupId(b.id) && isStr(b.name) && isIdList(b.members)
+      return validGroupId(b.id) && isStr(b.name) && isIdList(b.members) && (b.admins === undefined || isIdList(b.admins))
     case 'leave':
       return validGroupId(b.id)
+    case 'gname':
+      return validGroupId(b.id) && isStr(b.name)
+    case 'gkick':
+      return validGroupId(b.id) && validId(b.member)
+    case 'gadmin':
+      return validGroupId(b.id) && validId(b.member) && typeof b.on === 'boolean'
+    case 'read':
+      return typeof b.ts === 'number' && Number.isFinite(b.ts) && (b.with === undefined || validId(b.with))
+    case 'profile':
+      return isStr(b.mime)
     default:
       return false
   }
@@ -163,6 +182,34 @@ interface ConvMeta {
   unread: number
   lastTs: number
   preview: string
+  /** Newest message from someone else that I've told my devices (and maybe them) I read. */
+  readTs?: number
+  /** User ID → newest message time they've read. */
+  reads?: Dict<number>
+}
+/** Per-conversation settings, synced between my devices. The newest `at` wins. */
+interface ConvPrefs {
+  muted: boolean
+  pinned: boolean
+  archived: boolean
+  at: number
+}
+interface Settings {
+  readReceipts: boolean
+  at: number
+}
+interface Profile {
+  /** Profile picture (base64), or null. */
+  avatar: string | null
+  mime: string
+  at: number
+  /** When it was last sent to all contacts (it's re-sent before old copies expire on the server). */
+  sentAt: number
+}
+interface StoredAvatar {
+  at: number
+  mime: string
+  bytes: Uint8Array
 }
 interface Saved {
   server: string
@@ -184,11 +231,15 @@ const K = {
   pins: 'pins',
   groups: 'groups',
   left: 'left',
+  prefs: 'prefs',
+  settings: 'settings',
+  profile: 'profile',
   meta: 'meta',
   held: 'held',
   conv: (c: ConvId) => `conv:${c}`,
   file: (mid: string) => `file:${mid}`,
   seen: (mid: string) => `seen:${mid}`,
+  avatar: (id: string) => `avatar:${id}`,
 }
 const LS_USER = 'e2ee-chat.lastUsername'
 const LS_SERVER = 'e2ee-chat.lastServer'
@@ -228,6 +279,15 @@ export interface ChatState {
   typing: Dict<string[]>
   /** Id of the first message that was unread when the active conversation was opened. */
   firstUnread: string | null
+  /** state.messages is the newest part of the active conversation; true if there's more before it. */
+  hasOlder: boolean
+  /** Message to scroll to and highlight (set by openConv with a focus id, e.g. from search). */
+  highlight: string | null
+  /** Active conversation: user ID → time of the newest message they've read (read receipts). */
+  reads: Dict<number>
+  /** Users I blocked. */
+  blocked: FriendRequest[]
+  settings: { readReceipts: boolean }
 }
 
 export const state = reactive<ChatState>({
@@ -243,6 +303,11 @@ export const state = reactive<ChatState>({
   syncing: false,
   typing: dict(),
   firstUnread: null,
+  hasOlder: false,
+  highlight: null,
+  reads: dict(),
+  blocked: [],
+  settings: { readReceipts: true },
 })
 
 // ---------------------------------------------------------------------------
@@ -267,7 +332,7 @@ interface Welcome {
 type ServerMsg =
   | { type: 'prelogin'; req?: number; salt: string }
   | Welcome
-  | { type: 'friends'; friends: ServerUser[]; incoming: FriendRequest[]; outgoing: FriendRequest[] }
+  | { type: 'friends'; friends: ServerUser[]; incoming: FriendRequest[]; outgoing: FriendRequest[]; blocked?: FriendRequest[] }
   | { type: 'presence'; id: string; online: boolean }
   | { type: 'deliver'; seq: number; envelope: Envelope }
   | { type: 'signal'; envelope: Envelope }
@@ -385,7 +450,13 @@ interface VaultData {
   groups: Dict<Group>
   /** Groups I left (id → ms), so other devices don't bring them back. */
   left: Dict<number>
+  prefs: Dict<ConvPrefs>
+  settings: Settings
+  profile: Profile
 }
+
+const defaultSettings = (): Settings => ({ readReceipts: true, at: 0 })
+const defaultProfile = (): Profile => ({ avatar: null, mime: '', at: 0, sentAt: 0 })
 
 class Session {
   conn: Conn | null = null
@@ -402,6 +473,15 @@ class Session {
   fresh = false
   pins: Dict<Pin> = dict()
   left: Dict<number> = dict()
+  prefs: Dict<ConvPrefs> = dict()
+  settings: Settings = defaultSettings()
+  profile: Profile = defaultProfile()
+  /** Object URLs of profile pictures (user ID → URL); mine under my own ID. */
+  avatarUrls = new Map<string, string>()
+  /** Contacts to send my profile picture to (new contacts), batched. */
+  profileQueue = new Set<string>()
+  profileTimer: ReturnType<typeof setTimeout> | undefined
+  readTimer: ReturnType<typeof setTimeout> | undefined
   meta: Dict<ConvMeta> = dict()
   /** Every envelope already processed (replay protection), plus ones not yet written to disk. */
   seen = new Set<string>()
@@ -420,7 +500,8 @@ class Session {
 
   /** Incoming messages are processed one at a time, in order. */
   queue: Promise<unknown> = Promise.resolve()
-  fileUrls = new Map<string, string>()
+  /** Message id → object URL of a file I've shown, and its conversation (released when switching away). */
+  fileUrls = new Map<string, { url: string; conv: ConvId }>()
   /** When I last sent a typing signal, and to which conversation. */
   typingSent = { at: 0, conv: '' }
   /** "<conv> <user>" → timer that clears that typing indicator. */
@@ -502,6 +583,9 @@ async function flush(s: Session) {
     [K.pins, { ...s.pins }],
     [K.groups, rawGroups()],
     [K.left, { ...s.left }],
+    [K.prefs, { ...s.prefs }],
+    [K.settings, s.settings],
+    [K.profile, s.profile],
     [K.meta, { ...s.meta }],
     [K.held, s.held],
   ]
@@ -542,12 +626,23 @@ function validPin(p: unknown): p is Pin {
 function validGroup(g: unknown): g is Group {
   if (!g || typeof g !== 'object') return false
   const q = g as Group
-  return validGroupId(q.id) && isStr(q.name) && isIdList(q.members)
+  return validGroupId(q.id) && isStr(q.name) && isIdList(q.members) && (q.admins === undefined || isIdList(q.admins))
 }
+
+function validPrefs(p: unknown): p is ConvPrefs {
+  if (!p || typeof p !== 'object') return false
+  const q = p as ConvPrefs
+  return typeof q.muted === 'boolean' && typeof q.pinned === 'boolean' && typeof q.archived === 'boolean' && typeof q.at === 'number'
+}
+
+const validConvId = (c: string): c is ConvId =>
+  (c.startsWith('dm:') && validId(c.slice(3))) || (c.startsWith('g:') && validGroupId(c.slice(2)))
+
+const MAX_AVATAR_BYTES = 96 * 1024
 
 function parseVault(raw: unknown): VaultData {
   const v = (raw && typeof raw === 'object' ? raw : {}) as Partial<VaultData>
-  const out: VaultData = { pins: dict(), groups: dict(), left: dict() }
+  const out: VaultData = { pins: dict(), groups: dict(), left: dict(), prefs: dict(), settings: defaultSettings(), profile: defaultProfile() }
   for (const [id, p] of Object.entries(dict(v.pins))) {
     try {
       if (validId(id) && validPin(p)) out.pins[id] = { ...p, name: cleanLabel(p.name, 32) }
@@ -556,7 +651,22 @@ function parseVault(raw: unknown): VaultData {
     }
   }
   for (const [id, g] of Object.entries(dict(v.groups))) {
-    if (validGroup(g) && g.id === id) out.groups[id] = { id, name: cleanLabel(g.name, 64), members: [...new Set(g.members)] }
+    if (validGroup(g) && g.id === id) {
+      out.groups[id] = { id, name: cleanLabel(g.name, 64), members: [...new Set(g.members)] }
+      if (g.admins) out.groups[id]!.admins = [...new Set(g.admins)]
+    }
+  }
+  for (const [c, p] of Object.entries(dict(v.prefs))) {
+    if (validConvId(c) && validPrefs(p)) out.prefs[c] = { muted: p.muted, pinned: p.pinned, archived: p.archived, at: p.at }
+  }
+  const st = v.settings as Settings | undefined
+  if (st && typeof st.readReceipts === 'boolean' && typeof st.at === 'number') out.settings = { readReceipts: st.readReceipts, at: st.at }
+  const pr = v.profile as Profile | undefined
+  if (
+    pr && typeof pr.at === 'number' && typeof pr.sentAt === 'number' && isStr(pr.mime) &&
+    (pr.avatar === null || (isStr(pr.avatar) && pr.avatar.length <= (MAX_AVATAR_BYTES * 4) / 3 + 4))
+  ) {
+    out.profile = { avatar: pr.avatar, mime: safeMime(pr.mime), at: pr.at, sentAt: pr.sentAt }
   }
   for (const [id, t] of Object.entries(dict(v.left))) if (validGroupId(id) && typeof t === 'number') out.left[id] = t
   return out
@@ -565,10 +675,17 @@ function parseVault(raw: unknown): VaultData {
 /** Does this device know something the server's copy doesn't? */
 function vaultBehind(s: Session): boolean {
   const r = s.remoteVault
-  if (!r) return Object.keys(s.pins).length > 0 || Object.keys(state.groups).length > 0 || Object.keys(s.left).length > 0
+  if (!r) {
+    return (
+      Object.keys(s.pins).length > 0 || Object.keys(state.groups).length > 0 || Object.keys(s.left).length > 0 ||
+      Object.keys(s.prefs).length > 0 || s.settings.at > 0 || s.profile.at > 0
+    )
+  }
   for (const [id, p] of Object.entries(s.pins)) if (!r.pins[id] || p.at > r.pins[id]!.at) return true
   for (const [id, t] of Object.entries(s.left)) if (!r.left[id] || t > r.left[id]!) return true
   for (const id of Object.keys(state.groups)) if (!r.groups[id]) return true
+  for (const [c, p] of Object.entries(s.prefs)) if (!r.prefs[c] || p.at > r.prefs[c]!.at) return true
+  if (s.settings.at > r.settings.at || s.profile.at > r.profile.at || s.profile.sentAt > r.profile.sentAt) return true
   return false
 }
 
@@ -579,7 +696,14 @@ function scheduleVaultPush(s: Session) {
 
 async function pushVault(s: Session) {
   if (!live(s) || !s.conn || !vaultBehind(s)) return
-  const data: VaultData = { pins: { ...s.pins }, groups: rawGroups(), left: { ...s.left } }
+  const data: VaultData = {
+    pins: { ...s.pins },
+    groups: rawGroups(),
+    left: { ...s.left },
+    prefs: { ...s.prefs },
+    settings: s.settings,
+    profile: s.profile,
+  }
   try {
     await request(s, { type: 'vault_put', vault: sealVault(s.identity, data) })
     s.remoteVault = parseVault(JSON.parse(JSON.stringify(data)))
@@ -615,6 +739,19 @@ async function applyVault(s: Session, sealed: string | null | undefined) {
     }
     for (const [id, g] of Object.entries(remote.groups)) {
       if (!state.groups[id] && !s.left[id] && g.members.includes(s.me)) state.groups[id] = g
+    }
+    for (const [c, p] of Object.entries(remote.prefs)) {
+      if (!s.prefs[c] || p.at > s.prefs[c]!.at) s.prefs[c] = p
+    }
+    if (remote.settings.at > s.settings.at) {
+      s.settings = remote.settings
+      state.settings = { readReceipts: s.settings.readReceipts }
+    }
+    if (remote.profile.at > s.profile.at) {
+      s.profile = remote.profile
+      showMyAvatar(s)
+    } else if (remote.profile.at === s.profile.at && remote.profile.sentAt > s.profile.sentAt) {
+      s.profile.sentAt = remote.profile.sentAt
     }
     scheduleFlush(s)
     refreshConversations()
@@ -659,7 +796,83 @@ function updateContactFromPin(s: Session, id: string, patch: Partial<Contact> = 
     verified: pin.verified,
     keyChanged: changed,
     pendingFingerprint: changed ? fingerprint(serverKeys!) : null,
+    avatar: s.avatarUrls.get(id) ?? null,
     ...patch,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Profile pictures
+// ---------------------------------------------------------------------------
+
+function setAvatarUrl(s: Session, id: string, bytes: Uint8Array | null, mime: string) {
+  const old = s.avatarUrls.get(id)
+  if (old) URL.revokeObjectURL(old)
+  s.avatarUrls.delete(id)
+  if (bytes?.length) {
+    s.avatarUrls.set(id, URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: safeMime(mime) })))
+  }
+}
+
+function showMyAvatar(s: Session) {
+  setAvatarUrl(s, s.me, s.profile.avatar ? unb64(s.profile.avatar) : null, s.profile.mime)
+  if (state.account) state.account.avatar = s.avatarUrls.get(s.me) ?? null
+}
+
+/** Stores a contact's profile picture if it's newer than the one I have. Only call from inside serial(). */
+async function receiveProfile(s: Session, sender: string, ts: number, mime: string, bytes: Uint8Array) {
+  if (bytes.length > MAX_AVATAR_BYTES || (bytes.length && !SAFE_MIME.has(mime))) return
+  const prev = await get<StoredAvatar>(K.avatar(sender), db)
+  if (prev && prev.at >= ts) return
+  await set(K.avatar(sender), { at: ts, mime, bytes } satisfies StoredAvatar, db)
+  if (!live(s)) return
+  setAvatarUrl(s, sender, bytes, mime)
+  const c = state.contacts[sender]
+  if (c) c.avatar = s.avatarUrls.get(sender) ?? null
+}
+
+/** Everyone I can send to: pinned contacts whose key hasn't changed. */
+function profileAudience(s: Session): string[] {
+  return Object.keys(s.pins).filter((id) => id !== s.me && !state.contacts[id]?.keyChanged)
+}
+
+/** Sends my profile picture (or its removal) to these contacts, in batches. */
+function sendProfile(s: Session, ids: string[]) {
+  const bytes = s.profile.avatar ? unb64(s.profile.avatar) : new Uint8Array(0)
+  const at = s.profile.at || Date.now()
+  for (let i = 0; i < ids.length; i += 200) {
+    sendEnvelope(s, ids.slice(i, i + 200), { conv: { t: 'dm' }, body: { t: 'profile', mime: s.profile.mime } }, bytes, randomId(), at)
+  }
+}
+
+/** New contacts get my picture shortly after I first see them. */
+function queueProfile(s: Session, id: string) {
+  if (!s.profile.avatar || s.fresh) return
+  s.profileQueue.add(id)
+  if (s.profileTimer) return
+  s.profileTimer = setTimeout(() => {
+    s.profileTimer = undefined
+    const ids = [...s.profileQueue].filter((x) => s.pins[x] && !state.contacts[x]?.keyChanged)
+    s.profileQueue.clear()
+    if (!live(s) || !ids.length) return
+    try {
+      sendProfile(s, ids)
+    } catch (e) {
+      console.warn('could not send profile picture', e)
+    }
+  }, 3000)
+}
+
+/** Messages on the server expire, so my picture is re-sent to everyone every 60 days. */
+function refreshProfile(s: Session) {
+  if (!s.profile.avatar || Date.now() - s.profile.sentAt < 60 * 86_400_000) return
+  try {
+    sendProfile(s, profileAudience(s))
+    s.profile.sentAt = Date.now()
+    scheduleFlush(s)
+    scheduleVaultPush(s)
+  } catch (e) {
+    console.warn('could not send profile picture', e)
   }
 }
 
@@ -672,6 +885,7 @@ function applyServerUser(s: Session, raw: unknown, opts: { pin: boolean; friend?
   if (!s.pins[u.id] && opts.pin) {
     s.pins[u.id] = { name: u.name, signPk: u.signPk, encPk: u.encPk, verified: false, at: 0 }
     added = true
+    queueProfile(s, u.id)
   }
   // A pinned contact's name never changes (usernames are fixed), so the server can't relabel keys.
   const patch: Partial<Contact> = {}
@@ -729,6 +943,7 @@ function applyFriends(s: Session, m: Extract<ServerMsg, { type: 'friends' }>) {
       .filter((r): r is FriendRequest => !!r && validId(r.id) && isStr(r.name) && typeof r.ts === 'number')
       .map((r) => ({ id: r.id, name: cleanLabel(r.name, 32), ts: r.ts }))
   state.requests = { incoming: reqs(m.incoming), outgoing: reqs(m.outgoing) }
+  state.blocked = reqs(m.blocked)
   if (added) pinsChanged(s)
   refreshConversations()
 }
@@ -757,13 +972,17 @@ function refreshConversations() {
   const list: Conversation[] = []
   const add = (id: ConvId, kind: 'dm' | 'group', title: string) => {
     const m = s.meta[id] ?? { unread: 0, lastTs: 0, preview: '' }
-    list.push({ id, kind, title, unread: m.unread, lastTs: m.lastTs, preview: m.preview, muted: false, pinned: false, archived: false })
+    const p = s.prefs[id]
+    list.push({
+      id, kind, title, unread: m.unread, lastTs: m.lastTs, preview: m.preview,
+      muted: !!p?.muted, pinned: !!p?.pinned, archived: !!p?.archived,
+    })
   }
   for (const g of Object.values(state.groups)) add(`g:${g.id}`, 'group', g.name)
   for (const c of Object.values(state.contacts)) {
     if (c.friend || s.meta[`dm:${c.id}`]) add(`dm:${c.id}`, 'dm', c.name)
   }
-  list.sort((a, b) => b.lastTs - a.lastTs || a.title.localeCompare(b.title))
+  list.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.lastTs - a.lastTs || a.title.localeCompare(b.title))
   state.conversations = list
 }
 
@@ -799,6 +1018,11 @@ async function appendMessage(s: Session, m: ChatMessage, countUnread: boolean) {
   }
   if (countUnread && !s.fresh && state.active !== m.conv) meta.unread++
   s.meta[m.conv] = meta
+  if (countUnread && !s.fresh) {
+    const p = s.prefs[m.conv]
+    if (p?.archived && !p.muted) setPrefs(s, m.conv, { archived: false })
+    if (state.active === m.conv) scheduleRead(s)
+  }
   scheduleFlush(s)
   if (m.from) stopTyping(m.conv, m.from)
   if (countUnread && !s.fresh) {
@@ -860,8 +1084,8 @@ async function applyChange(s: Session, conv: ConvId, sender: string, body: Paylo
     if (j >= 0) state.messages.splice(j, 1)
     if (m.kind === 'file') {
       await delMany([K.file(m.id)], db)
-      const url = s.fileUrls.get(m.id)
-      if (url) URL.revokeObjectURL(url)
+      const f = s.fileUrls.get(m.id)
+      if (f) URL.revokeObjectURL(f.url)
       s.fileUrls.delete(m.id)
     }
   }
@@ -922,6 +1146,132 @@ function handleSignal(s: Session, env: Envelope) {
   const key = `${conv} ${sender}`
   clearTimeout(s.typingTimers.get(key))
   s.typingTimers.set(key, setTimeout(() => live(s) && stopTyping(conv, sender), 6000))
+}
+
+function setPrefs(s: Session, conv: ConvId, patch: Partial<Omit<ConvPrefs, 'at'>>) {
+  const cur = s.prefs[conv] ?? { muted: false, pinned: false, archived: false, at: 0 }
+  s.prefs[conv] = { ...cur, ...patch, at: Math.max(Date.now(), cur.at + 1) }
+  scheduleFlush(s)
+  scheduleVaultPush(s)
+  refreshConversations()
+}
+
+// ---------------------------------------------------------------------------
+// Read receipts
+// ---------------------------------------------------------------------------
+
+const watching = () => typeof document !== 'undefined' && document.visibilityState === 'visible' && document.hasFocus()
+
+function scheduleRead(s: Session) {
+  clearTimeout(s.readTimer)
+  s.readTimer = setTimeout(() => void sendRead(s), 800)
+}
+
+/**
+ * Tells my other devices (and, if read receipts are on, the others in the chat) that I've
+ * read the active conversation up to its newest message from someone else.
+ */
+async function sendRead(s: Session) {
+  const conv = state.active
+  if (!live(s) || !conv || !watching() || !s.conn) return
+  const list = await loadConv(s, conv)
+  let ts = 0
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i]!
+    if (m.from && m.from !== s.me) {
+      ts = m.ts
+      break
+    }
+  }
+  const meta = s.meta[conv]
+  if (!ts || !meta || (meta.readTs ?? 0) >= ts || state.active !== conv) return
+  try {
+    const { pc, to } = await targetsOf(s, conv)
+    const body: PayloadBody = { t: 'read', ts }
+    if (conv.startsWith('dm:')) body.with = conv.slice(3)
+    sendEnvelope(s, s.settings.readReceipts ? to : [], { conv: pc, body })
+    meta.readTs = ts
+    scheduleFlush(s)
+  } catch {
+    /* tried again on the next message or focus */
+  }
+}
+
+if (typeof window !== 'undefined') {
+  const poke = () => session && state.active && scheduleRead(session)
+  window.addEventListener('focus', poke)
+  document.addEventListener('visibilitychange', poke)
+}
+
+/** A read receipt: mine (from another device) clears unread here; others' show as "Seen". */
+async function applyRead(s: Session, conv: ConvId, sender: string, ts: number) {
+  const meta = s.meta[conv] ?? { unread: 0, lastTs: 0, preview: '' }
+  if (sender === s.me) {
+    if ((meta.readTs ?? 0) >= ts) return
+    meta.readTs = ts
+    if (meta.unread) {
+      const list = await loadConv(s, conv)
+      meta.unread = list.filter((m) => m.from && m.from !== s.me && m.ts > ts).length
+    }
+  } else {
+    const reads = dict<number>(meta.reads)
+    if ((reads[sender] ?? 0) >= ts) return
+    reads[sender] = ts
+    meta.reads = reads
+    if (state.active === conv) state.reads = { ...reads }
+  }
+  s.meta[conv] = meta
+  scheduleFlush(s)
+  refreshConversations()
+}
+
+// ---------------------------------------------------------------------------
+// Group admin
+// ---------------------------------------------------------------------------
+
+/** Groups from before admins existed have no list: everyone in them is an admin. */
+const isAdmin = (g: Group, id: string) => !g.admins || g.admins.includes(id)
+
+type GroupOp = Extract<PayloadBody, { t: 'gname' | 'gkick' | 'gadmin' }>
+
+/** Applies a rename, removal or admin change by `sender`. Only call from inside serial(), or for my own changes. */
+async function applyGroupOp(s: Session, sender: string, body: GroupOp, ts: number) {
+  const g = state.groups[body.id]
+  if (!g || !g.members.includes(sender) || !isAdmin(g, sender)) return
+  const conv: ConvId = `g:${g.id}`
+  const who = sender === s.me ? 'You' : displayName(sender)
+  if (body.t === 'gname') {
+    const name = cleanLabel(body.name, 64)
+    if (!name || name === g.name) return
+    g.name = name
+    groupsChanged(s)
+    await systemMessage(s, conv, `${who} renamed the group to “${name}”`, ts)
+    return
+  }
+  const member = body.member
+  if (!g.members.includes(member)) return
+  const whom = member === s.me ? 'you' : displayName(member)
+  if (body.t === 'gkick') {
+    if (member === sender) return
+    if (member === s.me) {
+      await removeGroupLocally(s, g.id, false)
+      if (!s.fresh) state.error = `${displayName(sender)} removed you from “${g.name}”`
+      return
+    }
+    g.members = g.members.filter((id) => id !== member)
+    if (g.admins) g.admins = g.admins.filter((id) => id !== member)
+    groupsChanged(s)
+    await systemMessage(s, conv, `${who} removed ${whom}`, ts)
+    return
+  }
+  const admins = new Set(g.admins ?? g.members)
+  if (body.on === admins.has(member) && g.admins) return
+  if (body.on) admins.add(member)
+  else admins.delete(member)
+  if (!admins.size) return // a group always keeps an admin
+  g.admins = g.members.filter((id) => admins.has(id))
+  groupsChanged(s)
+  await systemMessage(s, conv, body.on ? `${who} made ${whom} an admin` : `${who} removed ${whom} as admin`, ts)
 }
 
 async function systemMessage(s: Session, conv: ConvId, text: string, ts = Date.now()) {
@@ -1063,7 +1413,12 @@ async function handlePayload(
       if (!proposed.includes(me) || !trusted || s.left[body.id]) return
       const name = cleanLabel(body.name, 64) || 'Group'
       await ensurePinned(s, proposed).catch(noop)
-      state.groups[body.id] = { id: body.id, name, members: proposed }
+      const group: Group = { id: body.id, name, members: proposed }
+      if (body.admins) {
+        const admins = proposed.filter((id) => body.admins!.includes(id))
+        group.admins = admins.length ? admins : [sender]
+      }
+      state.groups[body.id] = group
       groupsChanged(s)
       const others = proposed.filter((id) => id !== me && id !== sender)
       await systemMessage(
@@ -1095,15 +1450,37 @@ async function handlePayload(
       return
     }
     g.members = g.members.filter((id) => id !== sender)
+    let promoted: string | undefined
+    if (g.admins) {
+      g.admins = g.admins.filter((id) => id !== sender)
+      if (!g.admins.length && g.members.length) g.admins = [(promoted = g.members[0]!)]
+    }
     groupsChanged(s)
     await systemMessage(s, `g:${g.id}`, `${displayName(sender)} left the group`, ts)
+    if (promoted) await systemMessage(s, `g:${g.id}`, `${promoted === me ? 'You are' : `${displayName(promoted)} is`} now an admin`, ts)
+    return
+  }
+
+  if (body.t === 'gname' || body.t === 'gkick' || body.t === 'gadmin') {
+    if (pc.t !== 'g' || pc.id !== body.id) return
+    await applyGroupOp(s, sender, body, ts)
+    return
+  }
+
+  if (body.t === 'profile') {
+    if (mine || pc.t !== 'dm' || !s.pins[sender]) return
+    await receiveProfile(s, sender, ts, body.mime, attachment)
     return
   }
 
   // Chat content.
   let conv: ConvId
   if (pc.t === 'dm') {
-    if (mine) {
+    if (mine && body.t === 'read') {
+      // Sent only to my own devices when read receipts are off.
+      if (!body.with || !s.pins[body.with]) return
+      conv = `dm:${body.with}`
+    } else if (mine) {
       // A copy of something I sent from another device.
       const peers = recipients.filter((id) => id !== me)
       if (peers.length !== 1) return
@@ -1121,6 +1498,10 @@ async function handlePayload(
   if (!mine) await ensurePinned(s, [sender]).catch(noop)
 
   if (body.t === 'typing') return
+  if (body.t === 'read') {
+    await applyRead(s, conv, sender, Math.min(body.ts, ts))
+    return
+  }
   if (body.t === 'edit' || body.t === 'delete' || body.t === 'react') {
     await applyChange(s, conv, sender, body, ts)
     return
@@ -1222,6 +1603,8 @@ async function handleQueued(s: Session, m: ServerMsg) {
       state.syncing = false
       s.fresh = false
       await flush(s)
+      refreshProfile(s)
+      scheduleRead(s)
       break
     case 'vault':
       await applyVault(s, m.vault)
@@ -1306,10 +1689,13 @@ function stop(s: Session) {
   clearTimeout(s.reconnectTimer)
   clearTimeout(s.flushTimer)
   clearTimeout(s.vaultTimer)
+  clearTimeout(s.profileTimer)
+  clearTimeout(s.readTimer)
   s.conn?.close()
   for (const r of s.requests.values()) r.reject(new Error('Signed out'))
   s.requests.clear()
-  for (const url of s.fileUrls.values()) URL.revokeObjectURL(url)
+  for (const f of s.fileUrls.values()) URL.revokeObjectURL(f.url)
+  for (const url of s.avatarUrls.values()) URL.revokeObjectURL(url)
 }
 
 function resetState() {
@@ -1325,30 +1711,48 @@ function resetState() {
     syncing: false,
     typing: dict(),
     firstUnread: null,
+    hasOlder: false,
+    highlight: null,
+    reads: dict(),
+    blocked: [],
+    settings: { readReceipts: true },
   } satisfies Partial<ChatState>)
 }
 
 /** Loads this device's local data into a new session and makes it current. */
 async function loadSession(saved: Saved): Promise<Session> {
   const s = new Session(saved)
-  const [cursor, pins, groups, left, meta, held] = await getMany(
-    [K.cursor, K.pins, K.groups, K.left, K.meta, K.held],
+  const [cursor, pins, groups, left, prefs, settings, profile, meta, held] = await getMany(
+    [K.cursor, K.pins, K.groups, K.left, K.prefs, K.settings, K.profile, K.meta, K.held],
     db,
   )
   s.cursor = typeof cursor === 'number' ? cursor : 0
-  const vault = parseVault({ pins, groups, left })
+  const vault = parseVault({ pins, groups, left, prefs, settings, profile })
   s.pins = vault.pins
   s.left = vault.left
+  s.prefs = vault.prefs
+  s.settings = vault.settings
+  s.profile = vault.profile
   s.meta = dict(meta)
   s.held = Array.isArray(held) ? held : []
+  const avatarKeys: string[] = []
   for (const key of await idbKeys(db)) {
-    if (isStr(key) && key.startsWith('seen:')) s.seen.add(key.slice(5))
+    if (!isStr(key)) continue
+    if (key.startsWith('seen:')) s.seen.add(key.slice(5))
+    else if (key.startsWith('avatar:')) avatarKeys.push(key)
   }
+  const avatars = await getMany<StoredAvatar | undefined>(avatarKeys, db)
+  avatarKeys.forEach((key, i) => {
+    const a = avatars[i]
+    if (a?.bytes instanceof Uint8Array) setAvatarUrl(s, key.slice(7), a.bytes, a.mime)
+  })
 
   if (session) stop(session)
   session = s
   resetState()
-  state.account = { server: saved.server, id: saved.id, username: saved.username }
+  state.account = { server: saved.server, id: saved.id, username: saved.username, avatar: null }
+  state.settings = { readReceipts: s.settings.readReceipts }
+  showMyAvatar(s)
   state.groups = vault.groups
   for (const id of Object.keys(s.pins)) updateContactFromPin(s, id)
   refreshConversations()
@@ -1599,7 +2003,19 @@ export async function trustNewKey(id: string, seenFingerprint: string) {
 // Public API: conversations
 // ---------------------------------------------------------------------------
 
-export async function openConv(conv: ConvId) {
+/** How many messages are put on screen at a time. */
+const PAGE = 60
+
+/** Forgets object URLs of files outside the conversation on screen, so their memory can be freed. */
+function releaseFiles(s: Session, keep: ConvId) {
+  for (const [mid, f] of s.fileUrls) {
+    if (f.conv === keep) continue
+    URL.revokeObjectURL(f.url)
+    s.fileUrls.delete(mid)
+  }
+}
+
+export async function openConv(conv: ConvId, focus?: string) {
   const s = requireSession()
   state.active = conv
   const meta = s.meta[conv]
@@ -1619,8 +2035,57 @@ export async function openConv(conv: ConvId) {
       n--
     }
   }
+  releaseFiles(s, conv)
+  let start = Math.max(0, list.length - PAGE)
+  const unreadAt = firstUnread ? list.findIndex((m) => m.id === firstUnread) : -1
+  if (unreadAt >= 0) start = Math.min(start, Math.max(0, unreadAt - 10))
+  const focusAt = focus ? list.findIndex((m) => m.id === focus) : -1
+  if (focusAt >= 0) start = Math.min(start, Math.max(0, focusAt - 20))
   state.firstUnread = firstUnread
-  state.messages = list.slice()
+  state.highlight = focusAt >= 0 ? focus! : null
+  state.messages = list.slice(start)
+  state.hasOlder = start > 0
+  state.reads = { ...dict<number>(s.meta[conv]?.reads) }
+  scheduleRead(s)
+}
+
+/** Puts the next page of older messages of the active conversation on screen. Resolves false if there are none. */
+export async function loadOlder(): Promise<boolean> {
+  const s = requireSession()
+  const conv = state.active
+  if (!conv || !state.hasOlder) return false
+  const list = await loadConv(s, conv)
+  if (state.active !== conv) return false
+  const first = state.messages[0]
+  const idx = first ? list.findIndex((m) => m.id === first.id) : list.length
+  if (idx <= 0) {
+    state.hasOlder = false
+    return false
+  }
+  const start = Math.max(0, idx - PAGE)
+  state.messages.unshift(...list.slice(start, idx))
+  state.hasOlder = start > 0
+  return true
+}
+
+/** Searches the message history on this device. All words must match; newest first. */
+export async function search(query: string, limit = 50): Promise<SearchHit[]> {
+  const s = requireSession()
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
+  if (!terms.length) return []
+  const hits: SearchHit[] = []
+  for (const c of state.conversations) {
+    const cached = s.convs.get(c.id)
+    const list = cached ? await cached : ((await get<ChatMessage[]>(K.conv(c.id), db)) ?? [])
+    if (session !== s) return []
+    for (const m of list) {
+      if (m.kind === 'system') continue
+      const text = (m.kind === 'file' ? (m.file?.name ?? '') : docToText(m.doc)).toLowerCase()
+      if (terms.every((t) => text.includes(t))) hits.push({ conv: c.id, title: c.title, msg: m })
+    }
+  }
+  hits.sort((a, b) => b.msg.ts - a.msg.ts)
+  return hits.slice(0, limit)
 }
 
 function sendEnvelope(s: Session, to: string[], header: PayloadHeader, attachment?: Uint8Array, id = randomId(), ts = Date.now()) {
@@ -1665,6 +2130,7 @@ async function sendContent(header: (pc: PayloadConv) => PayloadHeader, local: Pa
   }
   if (!live(s)) return
   await appendMessage(s, msg, false)
+  if (s.prefs[conv]?.archived) setPrefs(s, conv, { archived: false })
   if (state.active === conv) state.firstUnread = null // replying means I've read it
   s.pendingSends.set(id, { conv, mid })
   try {
@@ -1705,11 +2171,13 @@ export async function fileUrl(msg: ChatMessage): Promise<string | null> {
   const s = session
   if (!s || msg.kind !== 'file' || !msg.file) return null
   const cached = s.fileUrls.get(msg.id)
-  if (cached) return cached
+  if (cached) return cached.url
   const bytes = await get<Uint8Array>(K.file(msg.id), db)
   if (!bytes || session !== s) return null
+  const again = s.fileUrls.get(msg.id)
+  if (again) return again.url
   const url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: safeMime(msg.file.mime) }))
-  s.fileUrls.set(msg.id, url)
+  s.fileUrls.set(msg.id, { url, conv: msg.conv })
   return url
 }
 
@@ -1719,7 +2187,7 @@ export async function createGroup(nameInput: string, members: string[]): Promise
   if (!name) throw new Error('Give the group a name')
   const others = [...new Set(members)].filter((id) => validId(id) && id !== s.me && state.contacts[id]?.friend)
   if (others.length === 0) throw new Error('Pick at least one friend')
-  const group: Group = { id: randomId(), name, members: [s.me, ...others] }
+  const group: Group = { id: randomId(), name, members: [s.me, ...others], admins: [s.me] }
   sendEnvelope(s, others, { conv: { t: 'g', id: group.id }, body: { t: 'group', ...group } })
   state.groups[group.id] = group
   groupsChanged(s)
@@ -1738,14 +2206,15 @@ export async function addMembers(groupId: string, members: string[]) {
   const all = [...g.members, ...added]
   sendEnvelope(s, await groupRecipients(s, all), {
     conv: { t: 'g', id: g.id },
-    body: { t: 'group', id: g.id, name: g.name, members: all },
+    body: { t: 'group', id: g.id, name: g.name, members: all, admins: g.admins },
   })
   g.members = all
   groupsChanged(s)
   await systemMessage(s, `g:${g.id}`, `You added ${names(added)}`)
 }
 
-async function removeGroupLocally(s: Session, groupId: string) {
+/** `remember`: keep it out for good (I left), so other devices and old invites don't bring it back. */
+async function removeGroupLocally(s: Session, groupId: string, remember = true) {
   const conv: ConvId = `g:${groupId}`
   const list = await loadConv(s, conv)
   await delMany([K.conv(conv), ...list.filter((m) => m.kind === 'file').map((m) => K.file(m.id))], db)
@@ -1753,7 +2222,7 @@ async function removeGroupLocally(s: Session, groupId: string) {
   s.dirtyConvs.delete(conv)
   delete state.groups[groupId]
   delete s.meta[conv]
-  s.left[groupId] = Date.now()
+  if (remember) s.left[groupId] = Date.now()
   if (state.active === conv) {
     state.active = null
     state.messages = []
@@ -1831,4 +2300,101 @@ export function onIncoming(cb: (m: ChatMessage) => void): () => void {
 }
 export function previewText(m: ChatMessage): string {
   return previewOf(m)
+}
+
+// ---------------------------------------------------------------------------
+// Public API: blocking, chat settings, profile picture, group admin
+// ---------------------------------------------------------------------------
+
+/** Blocks a user: ends the friendship, and nothing they send (requests, DMs, group messages) reaches me. */
+export function blockUser(id: string) {
+  return friendOp('block', id)
+}
+export function unblockUser(id: string) {
+  return friendOp('unblock', id)
+}
+
+/** Mute, pin or archive a conversation (synced to my other devices). */
+export function setConvPrefs(conv: ConvId, patch: Partial<{ muted: boolean; pinned: boolean; archived: boolean }>) {
+  setPrefs(requireSession(), conv, patch)
+}
+
+/** Whether others see when I've read their messages. My own devices always sync read state. */
+export function setReadReceipts(on: boolean) {
+  const s = requireSession()
+  s.settings = { readReceipts: on, at: Date.now() }
+  state.settings = { readReceipts: on }
+  scheduleFlush(s)
+  scheduleVaultPush(s)
+}
+
+/** Crops to a square and shrinks to fit MAX_AVATAR_BYTES. */
+async function encodeAvatar(file: File): Promise<{ bytes: Uint8Array; mime: string }> {
+  let bmp: ImageBitmap
+  try {
+    bmp = await createImageBitmap(file)
+  } catch {
+    throw new Error("That image couldn't be opened")
+  }
+  const side = Math.min(bmp.width, bmp.height)
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 256
+  canvas.getContext('2d')!.drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, 256, 256)
+  bmp.close()
+  for (const q of [0.85, 0.7, 0.5]) {
+    let blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/webp', q))
+    // Safari can't encode WebP and hands back PNG.
+    if (blob?.type !== 'image/webp') blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', q))
+    if (blob && blob.size <= MAX_AVATAR_BYTES) return { bytes: new Uint8Array(await blob.arrayBuffer()), mime: blob.type }
+  }
+  throw new Error("That image couldn't be made small enough")
+}
+
+/** Sets (or with null removes) my profile picture and sends it to all my contacts, encrypted. */
+export async function setAvatar(file: File | null) {
+  const s = requireSession()
+  const img = file ? await encodeAvatar(file) : null
+  if (!live(s)) return
+  s.profile = { avatar: img ? b64(img.bytes) : null, mime: img?.mime ?? '', at: Date.now(), sentAt: 0 }
+  showMyAvatar(s)
+  scheduleFlush(s)
+  scheduleVaultPush(s)
+  try {
+    sendProfile(s, profileAudience(s))
+    s.profile.sentAt = Date.now()
+  } catch {
+    /* sent after reconnecting (sentAt stays 0) */
+  }
+}
+
+export function isGroupAdmin(groupId: string, userId?: string): boolean {
+  const g = state.groups[groupId]
+  const id = userId ?? session?.me
+  return !!g && !!id && g.members.includes(id) && isAdmin(g, id)
+}
+
+async function groupOp(body: GroupOp) {
+  const s = requireSession()
+  const g = state.groups[body.id]
+  if (!g) throw new Error('Group not found')
+  if (!isAdmin(g, s.me)) throw new Error('Only admins can do that')
+  const to = await groupRecipients(s, g.members)
+  sendEnvelope(s, to, { conv: { t: 'g', id: g.id }, body })
+  await applyGroupOp(s, s.me, body, Date.now())
+}
+
+export async function renameGroup(groupId: string, nameInput: string) {
+  const name = cleanLabel(nameInput, 64)
+  if (!name) throw new Error('Give the group a name')
+  await groupOp({ t: 'gname', id: groupId, name })
+}
+
+/** Removes someone from a group (admins only). They get a notice and lose the chat. */
+export async function removeMember(groupId: string, member: string) {
+  if (member === session?.me) throw new Error('Use Leave group instead')
+  await groupOp({ t: 'gkick', id: groupId, member })
+}
+
+export async function setAdmin(groupId: string, member: string, on: boolean) {
+  await groupOp({ t: 'gadmin', id: groupId, member, on })
 }

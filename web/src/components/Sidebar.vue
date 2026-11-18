@@ -5,9 +5,11 @@ import { toast } from 'vue-sonner'
 import NewGroupDialog from '@/components/NewGroupDialog.vue'
 import EntryMenu from '@/components/shell/EntryMenu.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
+import { drafts } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
 import { errMsg, relTime } from '@/lib/format'
 import { openConversation, openFriends, showConv } from '@/lib/nav'
+import { docToText } from '@/lib/render'
 import { isDark, toggleTheme } from '@/lib/theme'
 import { accountOpen, paletteOpen, useCopy } from '@/lib/ui'
 import type { Conversation } from '@/lib/types'
@@ -22,6 +24,10 @@ const isMac = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(naviga
 const dms = computed(() => chat.state.conversations.filter((c) => c.kind === 'dm'))
 const groups = computed(() => chat.state.conversations.filter((c) => c.kind === 'group'))
 
+function draftOf(c: Conversation) {
+  const d = c.id === chat.state.active ? undefined : drafts.get(c.id)
+  return d?.doc ? docToText(d.doc as Parameters<typeof docToText>[0]).trim() : ''
+}
 const contactOf = (c: Conversation) => (c.kind === 'dm' ? chat.state.contacts[c.id.slice(3)] : undefined)
 const idOf = (c: Conversation) => c.id.slice(c.kind === 'dm' ? 3 : 2)
 
@@ -93,7 +99,7 @@ async function select(c: Conversation) {
                     <span class="shrink-0 text-[11px] font-normal text-muted-foreground">{{ relTime(c.lastTs) }}</span>
                   </span>
                   <span class="mt-0.5 flex items-center gap-1.5">
-                    <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">{{ c.preview }}</span>
+                    <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground"><template v-if="draftOf(c)"><span class="font-semibold text-destructive">Draft:</span> {{ draftOf(c) }}</template><template v-else>{{ c.preview }}</template></span>
                     <span v-if="c.unread > 0" class="unread shrink-0">{{ c.unread > 99 ? '99+' : c.unread }}</span>
                   </span>
                 </span>
@@ -124,7 +130,7 @@ async function select(c: Conversation) {
                     <span class="shrink-0 text-[11px] font-normal text-muted-foreground">{{ relTime(c.lastTs) }}</span>
                   </span>
                   <span class="mt-0.5 flex items-center gap-1.5">
-                    <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">{{ c.preview }}</span>
+                    <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground"><template v-if="draftOf(c)"><span class="font-semibold text-destructive">Draft:</span> {{ draftOf(c) }}</template><template v-else>{{ c.preview }}</template></span>
                     <span v-if="c.unread > 0" class="unread shrink-0">{{ c.unread > 99 ? '99+' : c.unread }}</span>
                   </span>
                 </span>

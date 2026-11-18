@@ -341,3 +341,51 @@ async fn signals_are_relayed_live_but_never_stored() {
     let synced = recv_type(&mut later, "synced").await;
     assert!(synced["seq"].as_i64().is_some());
 }
+
+#[tokio::test]
+async fn blocking_stops_requests_and_messages() {
+    let (url, _dir) = start().await;
+    let mut a = register(&url, "alice", 1).await.unwrap();
+    let mut b = register(&url, "bob", 2).await.unwrap();
+    let mut c = register(&url, "carol", 3).await.unwrap();
+    befriend(&mut a, &mut b).await;
+
+    // Alice blocks Bob: the friendship ends and Bob shows up in her blocked list.
+    send(&mut a.ws, json!({"type": "block", "req": 5, "id": b.id})).await;
+    let (mut snap, mut acked) = (None, false);
+    while snap.is_none() || !acked {
+        let m = recv(&mut a.ws).await;
+        acked |= m["type"] == "ok" && m["req"] == 5;
+        if m["type"] == "friends" && m["blocked"].as_array().is_some_and(|l| !l.is_empty()) {
+            snap = Some(m);
+        }
+    }
+    let snap = snap.unwrap();
+    assert!(snap["friends"].as_array().unwrap().is_empty());
+    assert_eq!(snap["blocked"][0]["name"], "bob");
+
+    // Bob's new request looks sent to him but never reaches Alice.
+    send(&mut b.ws, json!({"type": "friend_request", "req": 6, "id": a.id})).await;
+    assert_eq!(recv_type(&mut b.ws, "ok").await["req"], 6);
+    // Alice can't send one to Bob while he's blocked.
+    send(&mut a.ws, json!({"type": "friend_request", "req": 7, "id": b.id})).await;
+    assert!(recv_type(&mut a.ws, "error").await["message"].as_str().unwrap().contains("Unblock"));
+
+    // A group message from Bob reaches Carol but not Alice.
+    send(&mut b.ws, json!({"type": "send", "envelope": envelope("g1", &b.id, &[&a.id, &c.id, &b.id])})).await;
+    assert_eq!(recv_type(&mut c.ws, "deliver").await["envelope"]["id"], "g1");
+    send(&mut c.ws, json!({"type": "send", "envelope": envelope("g2", &c.id, &[&a.id, &b.id, &c.id])})).await;
+    let next = recv_type(&mut a.ws, "deliver").await;
+    assert_eq!(next["envelope"]["id"], "g2");
+    let mut later = resume(&url, &a.token, 0).await;
+    let snap = recv_type(&mut later, "friends").await;
+    assert!(snap["incoming"].as_array().unwrap().is_empty());
+    let first = recv_type(&mut later, "deliver").await;
+    assert_eq!(first["envelope"]["id"], "g2");
+
+    // Unblocking lets requests through again.
+    send(&mut a.ws, json!({"type": "unblock", "req": 8, "id": b.id})).await;
+    assert_eq!(recv_type(&mut a.ws, "ok").await["req"], 8);
+    send(&mut a.ws, json!({"type": "friend_request", "req": 9, "id": b.id})).await;
+    assert_eq!(recv_type(&mut a.ws, "ok").await["req"], 9);
+}

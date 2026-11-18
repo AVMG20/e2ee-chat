@@ -4,7 +4,7 @@
 //! - accounts: username, public keys, and the user's private keys *encrypted on
 //!   their device* with a key derived from their password (the server never gets
 //!   the password or that key, only a separate hash used to log in),
-//! - who is friends with whom, and pending friend requests,
+//! - who is friends with whom, pending friend requests, and who blocked whom,
 //! - opaque encrypted envelopes, kept for a retention period so every device of
 //!   a user can download its history,
 //! - an opaque encrypted "vault" per user (contact pins, groups) for syncing devices.
@@ -141,6 +141,17 @@ enum ClientMsg {
         id: String,
     },
     FriendRemove {
+        #[serde(default)]
+        req: u64,
+        id: String,
+    },
+    /// Ends any friendship and pending requests, and stops delivering the user's messages to me.
+    Block {
+        #[serde(default)]
+        req: u64,
+        id: String,
+    },
+    Unblock {
         #[serde(default)]
         req: u64,
         id: String,
@@ -324,6 +335,13 @@ impl AppState {
                  PRIMARY KEY (from_id, to_id)
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS friend_requests_to ON friend_requests(to_id);
+             -- a blocked b
+             CREATE TABLE IF NOT EXISTS blocks (
+                 a TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                 b TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                 PRIMARY KEY (a, b)
+             ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS blocks_b ON blocks(b);
              CREATE TABLE IF NOT EXISTS messages (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  sender TEXT NOT NULL,
@@ -450,7 +468,20 @@ impl AppState {
         Ok(db.query_row("SELECT 1 FROM friends WHERE a = ?1 AND b = ?2", [a, b], |_| Ok(())).optional()?.is_some())
     }
 
-    /// Friends (with keys and presence) plus pending requests both ways.
+    fn has_blocked(&self, a: &str, b: &str) -> Result<bool> {
+        let db = self.db.lock().unwrap();
+        Ok(db.query_row("SELECT 1 FROM blocks WHERE a = ?1 AND b = ?2", [a, b], |_| Ok(())).optional()?.is_some())
+    }
+
+    /// Users who blocked `id`: nothing `id` sends reaches them.
+    fn blocked_by(&self, id: &str) -> Result<HashSet<String>> {
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare_cached("SELECT a FROM blocks WHERE b = ?1")?;
+        let ids = stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
+    /// Friends (with keys and presence), pending requests both ways, and blocked users.
     fn friends_snapshot(&self, id: &str) -> Result<String> {
         let friends = self.users(&self.friend_ids(id)?, true)?;
         let db = self.db.lock().unwrap();
@@ -464,15 +495,21 @@ impl AppState {
                 .collect::<rusqlite::Result<_>>()?;
             Ok(rows)
         };
+        // Requests from blocked users stay pending on their side but are never shown.
         let incoming = requests(
             "SELECT r.from_id, a.username, r.created_at FROM friend_requests r
-             JOIN accounts a ON a.id = r.from_id WHERE r.to_id = ?1 ORDER BY r.created_at",
+             JOIN accounts a ON a.id = r.from_id WHERE r.to_id = ?1
+             AND NOT EXISTS (SELECT 1 FROM blocks WHERE a = ?1 AND b = r.from_id) ORDER BY r.created_at",
         )?;
         let outgoing = requests(
             "SELECT r.to_id, a.username, r.created_at FROM friend_requests r
              JOIN accounts a ON a.id = r.to_id WHERE r.from_id = ?1 ORDER BY r.created_at",
         )?;
-        Ok(json!({"type": "friends", "friends": friends, "incoming": incoming, "outgoing": outgoing}).to_string())
+        let blocked = requests(
+            "SELECT k.b, a.username, 0 FROM blocks k JOIN accounts a ON a.id = k.b WHERE k.a = ?1 ORDER BY a.username",
+        )?;
+        Ok(json!({"type": "friends", "friends": friends, "incoming": incoming, "outgoing": outgoing, "blocked": blocked})
+            .to_string())
     }
 
     fn push_friends_snapshot(&self, id: &str) {
@@ -1057,6 +1094,34 @@ async fn handle_client_msg(
             state.push_friends_snapshot(&id);
             send_text(socket, ok(req)).await?;
         }
+        ClientMsg::Block { req, id } => {
+            if !valid_user_id(&id) || id == my || state.username_of(&id)?.is_none() {
+                send_text(socket, err(req, "No user with that ID")).await?;
+                return Ok(true);
+            }
+            {
+                let mut db = state.db.lock().unwrap();
+                let tx = db.transaction()?;
+                tx.execute("DELETE FROM friends WHERE (a = ?1 AND b = ?2) OR (a = ?2 AND b = ?1)", [my, &id])?;
+                tx.execute(
+                    "DELETE FROM friend_requests WHERE (from_id = ?1 AND to_id = ?2) OR (from_id = ?2 AND to_id = ?1)",
+                    [my, &id],
+                )?;
+                tx.execute("INSERT OR IGNORE INTO blocks(a, b) VALUES (?1, ?2)", [my, &id])?;
+                tx.commit()?;
+            }
+            state.push_friends_snapshot(my);
+            state.push_friends_snapshot(&id);
+            send_text(socket, ok(req)).await?;
+        }
+        ClientMsg::Unblock { req, id } => {
+            {
+                let db = state.db.lock().unwrap();
+                db.execute("DELETE FROM blocks WHERE a = ?1 AND b = ?2", [my, &id])?;
+            }
+            state.push_friends_snapshot(my);
+            send_text(socket, ok(req)).await?;
+        }
 
         ClientMsg::Lookup { req, ids } => {
             let ids: Vec<String> = ids.into_iter().filter(|i| valid_user_id(i)).take(MAX_RECIPIENTS).collect();
@@ -1082,6 +1147,7 @@ async fn handle_client_msg(
                 send_text(socket, failed("Invalid recipients")).await?;
                 return Ok(true);
             }
+            let blockers = state.blocked_by(my)?;
             let env_text = serde_json::to_string(&envelope)?;
             let size = env_text.len() as i64;
             let _order = state.send_order.lock().unwrap();
@@ -1112,7 +1178,7 @@ async fn handle_client_msg(
                         let seq = tx.last_insert_rowid();
                         {
                             let mut stmt = tx.prepare_cached("INSERT INTO inbox(user_id, msg_id) VALUES (?1, ?2)")?;
-                            for r in &recipients {
+                            for r in recipients.iter().filter(|r| !blockers.contains(**r)) {
                                 stmt.execute(params![r, seq])?;
                             }
                         }
@@ -1126,7 +1192,7 @@ async fn handle_client_msg(
                 Some(Err(e)) => failed(e),
                 Some(Ok(seq)) => {
                     let text = format!(r#"{{"type":"deliver","seq":{seq},"envelope":{env_text}}}"#);
-                    for r in &recipients {
+                    for r in recipients.iter().filter(|r| !blockers.contains(**r)) {
                         state.push_user(r, &text, None);
                     }
                     json!({"type": "sent", "id": meta.id, "seq": seq}).to_string()
@@ -1153,8 +1219,9 @@ async fn handle_client_msg(
             if env_text.len() > MAX_SIGNAL_BYTES {
                 return Ok(true);
             }
+            let blockers = state.blocked_by(my)?;
             let text = format!(r#"{{"type":"signal","envelope":{env_text}}}"#);
-            for r in &recipients {
+            for r in recipients.iter().filter(|r| !blockers.contains(**r)) {
                 state.push_user(r, &text, if *r == my { Some(session_id) } else { None });
             }
         }
@@ -1239,9 +1306,13 @@ fn friend_request(state: &AppState, me: &str, to: &str) -> Result<std::result::R
     if state.are_friends(me, to)? {
         return Ok(Err("You're already friends"));
     }
+    if state.has_blocked(me, to)? {
+        return Ok(Err("You blocked this user. Unblock them first."));
+    }
     {
         let mut db = state.db.lock().unwrap();
         let tx = db.transaction()?;
+        // A request to someone who blocked me is kept (so it looks pending) but never shown to them.
         let reverse = tx.execute("DELETE FROM friend_requests WHERE from_id = ?1 AND to_id = ?2", [to, me])?;
         if reverse == 1 {
             // They already asked us: that's a yes from both sides.

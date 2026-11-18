@@ -12,7 +12,10 @@ export const chat = {
    *   status, error, account (null when signed out), contacts (Dict by user ID),
    *   requests { incoming, outgoing }, groups, conversations, active, messages,
    *   syncing (true while downloading history after sign-in),
-   *   typing (conv → user IDs typing now), firstUnread (id of the first unread message when the active conv was opened).
+   *   typing (conv → user IDs typing now), firstUnread (id of the first unread message when the active conv was opened),
+   *   hasOlder (more messages before state.messages), highlight (message to scroll to), reads (active conv: user ID →
+   *   ts of the newest message they've read; my message is "seen" by them if its ts <= that), blocked (users I blocked),
+   *   settings { readReceipts }. Conversations have muted/pinned/archived; contacts and account have avatar (URL or null).
    */
   state: engine.state,
   /** True inside the Tauri desktop app. */
@@ -44,7 +47,10 @@ export const chat = {
   declineFriend: engine.declineFriend,
   removeFriend: engine.removeFriend,
 
-  /** Opens a conversation, loads its messages into state.messages, clears unread. */
+  /**
+   * Opens a conversation: puts its newest messages in state.messages (more via loadOlder) and
+   * clears unread. With `focus` (a message id), also loads up to that message and sets state.highlight.
+   */
   open: engine.openConv,
   /** Sends a Tiptap doc to the active conversation, optionally as a reply to a message. */
   sendText: engine.sendText,
@@ -75,6 +81,27 @@ export const chat = {
   /** Adds friends (user IDs) to a group. */
   addMembers: engine.addMembers,
   leaveGroup: engine.leaveGroup,
+  /** Rename a group (admins only). */
+  renameGroup: engine.renameGroup,
+  /** Remove a member from a group (admins only). */
+  removeMember: engine.removeMember,
+  /** Make a member an admin or not (admins only). A group always keeps at least one admin. */
+  setAdmin: engine.setAdmin,
+  /** Is this user (default: me) an admin of the group? */
+  isGroupAdmin: engine.isGroupAdmin,
+  /** Block a user: ends the friendship; their requests and messages no longer reach me. Listed in state.blocked. */
+  blockUser: engine.blockUser,
+  unblockUser: engine.unblockUser,
+  /** Mute / pin / archive a conversation: setConvPrefs(convId, { muted: true }). Synced to my devices. */
+  setConvPrefs: engine.setConvPrefs,
+  /** Turn read receipts (others seeing that I read their messages) on or off. state.settings.readReceipts. */
+  setReadReceipts: engine.setReadReceipts,
+  /** Set (File) or remove (null) my profile picture. It's cropped to a square and sent encrypted to my contacts. */
+  setAvatar: engine.setAvatar,
+  /** Put the next page of older messages on screen (state.hasOlder says if there are any). */
+  loadOlder: engine.loadOlder,
+  /** Search the history on this device: all words must match. Newest first. Open a hit with open(hit.conv, hit.msg.id). */
+  search: engine.search,
   setVerified: engine.setVerified,
   /** Accept a contact's changed key: trustNewKey(userId, contact.pendingFingerprint). */
   trustNewKey: engine.trustNewKey,

@@ -7,6 +7,8 @@ export interface Account {
   id: string
   /** Login name, also shown to friends and group members. */
   username: string
+  /** Object URL of my profile picture, or null. */
+  avatar: string | null
 }
 
 export type ConvId = `dm:${string}` | `g:${string}` // dm:<user id> | g:<group id>
@@ -27,6 +29,8 @@ export interface Contact {
   keyChanged: boolean
   /** Fingerprint of the new key when keyChanged; pass it to chat.trustNewKey after checking it. */
   pendingFingerprint: string | null
+  /** Object URL of their profile picture, or null. */
+  avatar: string | null
 }
 
 export interface FriendRequest {
@@ -40,6 +44,8 @@ export interface Group {
   name: string
   /** User IDs. */
   members: string[]
+  /** Can rename, remove members and pick admins. Missing in groups from older versions: everyone is an admin there. */
+  admins?: string[]
 }
 
 export interface FileInfo {
@@ -93,6 +99,13 @@ export interface Conversation {
   pinned: boolean
   /** Hidden from the main list (comes back on a new message unless muted). */
   archived: boolean
+}
+
+export interface SearchHit {
+  conv: ConvId
+  /** Conversation title. */
+  title: string
+  msg: ChatMessage
 }
 
 export type ConnectionStatus = 'offline' | 'connecting' | 'online'

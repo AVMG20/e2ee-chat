@@ -11,7 +11,8 @@ import EmojiPicker from '@/components/messages/EmojiPicker.vue'
 import MessageEditor from '@/components/messages/MessageEditor.vue'
 import ReactionBar from '@/components/messages/ReactionBar.vue'
 import { QUICK_EMOJI } from '@/components/messages/emoji'
-import { deleteMsg, deleteTarget, editingId, flashId, myId, reactTo, replyTo } from '@/components/messages/state'
+import { useLongPress } from '@/components/messages/longpress'
+import { canDeleteMsg, canEditMsg, deleteMsg, deleteTarget, editingId, flashId, myId, reactTo, replyTo } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
 import { formatClock, hueOf } from '@/lib/format'
 import { docToText, renderMessageHtml } from '@/lib/render'
@@ -33,8 +34,8 @@ const time = computed(() => formatClock(props.msg.ts))
 const failed = computed(() => props.msg.status === 'failed')
 const settled = computed(() => props.msg.status !== 'failed' && props.msg.status !== 'sending')
 const editing = computed(() => editingId.value === props.msg.id)
-const canEdit = computed(() => mine.value && settled.value && props.msg.kind === 'text')
-const canDelete = computed(() => mine.value && settled.value)
+const canEdit = computed(() => canEditMsg(props.msg))
+const canDelete = computed(() => canDeleteMsg(props.msg))
 const text = computed(() => (props.msg.kind === 'text' ? docToText(props.msg.doc) : ''))
 
 const html = computed(() => {
@@ -88,6 +89,8 @@ function onBodyClick(e: MouseEvent) {
   setTimeout(() => (btn.innerHTML = ICON_COPY), 1500)
 }
 
+const press = useLongPress(() => props.msg, () => settled.value && !editing.value)
+
 function askDelete(e?: MouseEvent) {
   if (e?.shiftKey) void deleteMsg(props.msg)
   else deleteTarget.value = props.msg
@@ -101,8 +104,10 @@ function askDelete(e?: MouseEvent) {
     <ContextMenuTrigger as-child>
       <div
         :data-mid="msg.id"
-        class="msg-row group relative px-4 py-0.5 pr-6 transition-colors duration-500"
+        class="msg-row group relative px-4 py-0.5 pr-6 transition-colors duration-500 [-webkit-touch-callout:none]"
+        v-bind="press.bind"
         :class="[
+          press.pressing.value && 'select-none',
           head ? 'mt-4' : '',
           animate && 'msg-in',
           mentionsMe && 'bg-primary/10 shadow-[inset_3px_0_0_var(--primary)] hover:!bg-primary/15',

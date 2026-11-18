@@ -1,6 +1,8 @@
 import { ref, watch } from 'vue'
 import { chat } from '@/lib/chat'
+import type { ConvId } from '@/lib/types'
 import { openConversation, view } from '@/lib/nav'
+import { focusWindow, isDesktop, setUnreadBadge } from '@/lib/desktop'
 
 const NOTIFY_KEY = 'e2ee-chat:notify'
 const SOUND_KEY = 'e2ee-chat:sound'
@@ -21,15 +23,45 @@ const write = (k: string, v: boolean) => {
   }
 }
 
-export const notifySupported = typeof Notification !== 'undefined'
-export const notifyEnabled = ref(read(NOTIFY_KEY) && notifySupported && Notification.permission === 'granted')
+type NotificationPlugin = typeof import('@tauri-apps/plugin-notification')
+const loadPlugin = (): Promise<NotificationPlugin> => import('@tauri-apps/plugin-notification')
+
+export const notifySupported = isDesktop || typeof Notification !== 'undefined'
+export const notifyEnabled = ref(
+  !isDesktop && read(NOTIFY_KEY) && notifySupported && Notification.permission === 'granted',
+)
 export const soundEnabled = ref(read(SOUND_KEY))
 /** Set when the browser has blocked notifications, so the UI can explain. */
-export const notifyDenied = ref(notifySupported && Notification.permission === 'denied')
+export const notifyDenied = ref(!isDesktop && notifySupported && Notification.permission === 'denied')
+
+// Desktop: the real permission state is async, so restore the saved preference once it is known.
+if (isDesktop && read(NOTIFY_KEY)) {
+  loadPlugin()
+    .then((p) => p.isPermissionGranted())
+    .then((ok) => {
+      notifyEnabled.value = ok
+    })
+    .catch(() => {})
+}
+
+async function setNotifyDesktop(on: boolean): Promise<boolean> {
+  if (!on) return false
+  try {
+    const p = await loadPlugin()
+    let granted = await p.isPermissionGranted()
+    if (!granted) granted = (await p.requestPermission()) === 'granted'
+    notifyDenied.value = !granted
+    return granted
+  } catch {
+    return false
+  }
+}
 
 /** Turns desktop notifications on (asking permission if needed) or off. Resolves to the new state. */
 export async function setNotify(on: boolean): Promise<boolean> {
-  if (on && notifySupported) {
+  if (isDesktop) {
+    on = await setNotifyDesktop(on)
+  } else if (on && notifySupported) {
     let perm = Notification.permission
     if (perm === 'default') perm = await Notification.requestPermission()
     notifyDenied.value = perm === 'denied'
@@ -69,16 +101,42 @@ function blip() {
   }
 }
 
+let actionListener: Promise<unknown> | undefined
+
+async function showDesktop(title: string, body: string, conv: ConvId) {
+  try {
+    const p = await loadPlugin()
+    // Click events are only delivered for notifications shown while a listener exists.
+    actionListener ??= p
+      .onAction((e) => {
+        const id = e.notification?.extra?.conv
+        void focusWindow()
+        if (typeof id === 'string') void openConversation(id as ConvId)
+      })
+      .catch(() => {})
+    await actionListener
+    p.sendNotification({ title, body, extra: { conv } })
+  } catch {
+    /* notifications unavailable */
+  }
+}
+
 /** Wires incoming messages to notifications/sound and the unread count to the tab title. Returns a cleanup function. */
 export function startNotifications(): () => void {
   const off = chat.onIncoming((m) => {
     const watching = !document.hidden && document.hasFocus() && view.value === 'chats' && chat.state.active === m.conv
     if (watching) return
-    if (soundEnabled.value) blip()
-    if (!notifyEnabled.value || !notifySupported || Notification.permission !== 'granted') return
     const conv = chat.state.conversations.find((c) => c.id === m.conv)
+    if (conv?.muted) return
+    if (soundEnabled.value) blip()
+    if (!notifyEnabled.value || !notifySupported) return
     const sender = chat.displayName(m.from)
     const title = conv?.kind === 'group' ? `${sender} in ${conv.title}` : sender
+    if (isDesktop) {
+      void showDesktop(title, chat.previewText(m), m.conv)
+      return
+    }
+    if (Notification.permission !== 'granted') return
     try {
       const n = new Notification(title, { body: chat.previewText(m), tag: m.conv })
       n.onclick = () => {
@@ -92,9 +150,10 @@ export function startNotifications(): () => void {
   })
 
   const stop = watch(
-    () => chat.state.conversations.reduce((n, c) => n + c.unread, 0),
+    () => chat.state.conversations.reduce((n, c) => (c.muted ? n : n + c.unread), 0),
     (n) => {
       document.title = n > 0 ? `(${n > 99 ? '99+' : n}) ${BASE_TITLE}` : BASE_TITLE
+      void setUnreadBadge(n)
     },
     { immediate: true },
   )
@@ -103,5 +162,6 @@ export function startNotifications(): () => void {
     off()
     stop()
     document.title = BASE_TITLE
+    void setUnreadBadge(0)
   }
 }

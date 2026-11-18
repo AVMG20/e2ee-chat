@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { Download, FileText, ImageOff, Maximize2 } from 'lucide-vue-next'
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { viewerId } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
 import { formatSize } from '@/lib/format'
 import type { ChatMessage, FileInfo } from '@/lib/types'
@@ -9,7 +9,6 @@ import type { ChatMessage, FileInfo } from '@/lib/types'
 const props = defineProps<{ msg: ChatMessage }>()
 const url = ref<string | null>(null)
 const loading = ref(true)
-const zoom = ref(false)
 
 const file = (): FileInfo => props.msg.file as FileInfo
 const isImage = () => file().mime.startsWith('image/')
@@ -36,7 +35,7 @@ watch(
     <button
       v-if="url"
       class="group/img relative block cursor-zoom-in overflow-hidden rounded-lg bg-inset outline-none focus-visible:shadow-[var(--glow)]"
-      :aria-label="`Open ${file().name}`" @click="zoom = true"
+      :aria-label="`Open ${file().name}`" @click="viewerId = msg.id"
     >
       <img :src="url" :alt="file().name" class="block max-h-80 min-h-12 min-w-12 object-contain" style="max-width: min(400px, 100%)">
       <span class="absolute top-2 right-2 flex size-7 items-center justify-center rounded-md bg-black/50 text-white opacity-0 transition-opacity group-hover/img:opacity-100"><Maximize2 class="size-3.5" /></span>
@@ -44,17 +43,6 @@ watch(
     <div v-else class="well flex h-36 w-56 items-center justify-center rounded-lg text-muted-foreground" :class="loading && 'animate-pulse'">
       <ImageOff v-if="!loading" class="size-6 opacity-60" />
     </div>
-    <Dialog v-model:open="zoom">
-      <DialogContent class="w-auto max-w-[96vw] gap-3 p-3 sm:max-w-[92vw]">
-        <DialogTitle class="sr-only">{{ file().name }}</DialogTitle>
-        <DialogDescription class="sr-only">Full-size image</DialogDescription>
-        <img v-if="url" :src="url" :alt="file().name" class="max-h-[78vh] max-w-full rounded-md object-contain">
-        <div class="flex items-center justify-between gap-3 px-1 text-xs text-muted-foreground">
-          <span class="truncate">{{ file().name }} · {{ formatSize(file().size) }}</span>
-          <a v-if="url" :href="url" :download="file().name" class="btn btn-soft btn-sm shrink-0 !text-foreground"><Download />Save</a>
-        </div>
-      </DialogContent>
-    </Dialog>
   </div>
 
   <!-- Other files: attachment card -->

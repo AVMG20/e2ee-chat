@@ -198,8 +198,12 @@ const editor = useEditor({
   editorProps: {
     attributes: { class: 'composer-editor prose-like', 'aria-label': 'Message' },
     handlePaste: (_view, event) => {
-      const files = Array.from(event.clipboardData?.files ?? [])
+      const cd = event.clipboardData
+      let files = Array.from(cd?.files ?? [])
+      if (!files.length) files = Array.from(cd?.items ?? []).flatMap((i) => (i.kind === 'file' ? [i.getAsFile()] : [])).filter((f): f is File => !!f)
       if (!files.length) return false
+      // Screenshots arrive as a generic "image.png"; give each a distinct name.
+      files = files.map((f) => (/^image\.\w+$/i.test(f.name) ? new File([f], `pasted-${Date.now()}-${nextKey}.${f.name.split('.').pop()}`, { type: f.type }) : f))
       event.preventDefault()
       addFiles(files)
       return true
@@ -218,7 +222,7 @@ watch(
   (now, old) => {
     const ed = editor.value
     if (!ed) return
-    if (old) {
+    if (old && chat.state.account) {
       drafts.set(old, { doc: isEmptyDoc(ed.getJSON()) ? null : ed.getJSON(), reply: replyTo.value })
       queues.set(old, queue.value)
     }
@@ -232,12 +236,25 @@ watch(
   },
 )
 
+// Signing out drops queued files too (state.ts clears the text drafts).
+watch(() => chat.state.account, (a) => {
+  if (a) return
+  for (const q of [...queue.value, ...[...queues.values()].flat()]) if (q.url) URL.revokeObjectURL(q.url)
+  queues.clear()
+  queue.value = []
+  editor.value?.commands.clearContent(false)
+  empty.value = true
+})
+
 watch(replyTo, (r) => {
   if (r) editor.value?.commands.focus()
 })
 
 onBeforeUnmount(() => {
-  editor.value?.destroy()
+  const ed = editor.value
+  const id = chat.state.active
+  if (ed && id && chat.state.account) drafts.set(id, { doc: isEmptyDoc(ed.getJSON()) ? null : ed.getJSON(), reply: replyTo.value })
+  ed?.destroy()
   for (const q of [...queue.value, ...[...queues.values()].flat()]) if (q.url) URL.revokeObjectURL(q.url)
 })
 
