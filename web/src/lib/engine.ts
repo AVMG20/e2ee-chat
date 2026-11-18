@@ -684,6 +684,8 @@ function vaultBehind(s: Session): boolean {
   for (const [id, p] of Object.entries(s.pins)) if (!r.pins[id] || p.at > r.pins[id]!.at) return true
   for (const [id, t] of Object.entries(s.left)) if (!r.left[id] || t > r.left[id]!) return true
   for (const id of Object.keys(state.groups)) if (!r.groups[id]) return true
+  // Removed here (e.g. I was kicked): the server's copy mustn't bring it back.
+  for (const [id, g] of Object.entries(r.groups)) if (!state.groups[id] && g.members.includes(s.me)) return true
   for (const [c, p] of Object.entries(s.prefs)) if (!r.prefs[c] || p.at > r.prefs[c]!.at) return true
   if (s.settings.at > r.settings.at || s.profile.at > r.profile.at || s.profile.sentAt > r.profile.sentAt) return true
   return false
@@ -815,7 +817,13 @@ function setAvatarUrl(s: Session, id: string, bytes: Uint8Array | null, mime: st
 }
 
 function showMyAvatar(s: Session) {
-  setAvatarUrl(s, s.me, s.profile.avatar ? unb64(s.profile.avatar) : null, s.profile.mime)
+  let bytes: Uint8Array | null = null
+  try {
+    bytes = s.profile.avatar ? unb64(s.profile.avatar) : null
+  } catch {
+    /* corrupt: show initials */
+  }
+  setAvatarUrl(s, s.me, bytes, s.profile.mime)
   if (state.account) state.account.avatar = s.avatarUrls.get(s.me) ?? null
 }
 
@@ -833,7 +841,10 @@ async function receiveProfile(s: Session, sender: string, ts: number, mime: stri
 
 /** Everyone I can send to: pinned contacts whose key hasn't changed. */
 function profileAudience(s: Session): string[] {
-  return Object.keys(s.pins).filter((id) => id !== s.me && !state.contacts[id]?.keyChanged)
+  const ids = new Set(Object.values(state.contacts).filter((c) => c.friend).map((c) => c.id))
+  for (const g of Object.values(state.groups)) for (const id of g.members) ids.add(id)
+  const blocked = new Set(state.blocked.map((b) => b.id))
+  return [...ids].filter((id) => id !== s.me && s.pins[id] && !blocked.has(id) && !state.contacts[id]?.keyChanged)
 }
 
 /** Sends my profile picture (or its removal) to these contacts, in batches. */
@@ -852,7 +863,8 @@ function queueProfile(s: Session, id: string) {
   if (s.profileTimer) return
   s.profileTimer = setTimeout(() => {
     s.profileTimer = undefined
-    const ids = [...s.profileQueue].filter((x) => s.pins[x] && !state.contacts[x]?.keyChanged)
+    const audience = new Set(profileAudience(s))
+    const ids = [...s.profileQueue].filter((x) => audience.has(x))
     s.profileQueue.clear()
     if (!live(s) || !ids.length) return
     try {
@@ -1020,7 +1032,7 @@ async function appendMessage(s: Session, m: ChatMessage, countUnread: boolean) {
   s.meta[m.conv] = meta
   if (countUnread && !s.fresh) {
     const p = s.prefs[m.conv]
-    if (p?.archived && !p.muted) setPrefs(s, m.conv, { archived: false })
+    if (p?.archived && !p.muted && m.ts > p.at) setPrefs(s, m.conv, { archived: false })
     if (state.active === m.conv) scheduleRead(s)
   }
   scheduleFlush(s)
@@ -1035,7 +1047,8 @@ async function appendMessage(s: Session, m: ChatMessage, countUnread: boolean) {
     }
   }
 
-  if (state.active === m.conv) {
+  // With older messages not on screen, ones from before the first shown are picked up by loadOlder.
+  if (state.active === m.conv && !(state.hasOlder && state.messages.length && m.ts < state.messages[0]!.ts)) {
     let j = state.messages.length
     while (j > 0 && state.messages[j - 1]!.ts > m.ts) j--
     state.messages.splice(j, 0, m)
@@ -1131,7 +1144,7 @@ function handleSignal(s: Session, env: Envelope) {
   } catch {
     return
   }
-  if (!validHeader(header) || header.body.t !== 'typing') return
+  if (!validHeader(header) || header.body.t !== 'typing' || state.blocked.some((b) => b.id === sender)) return
   let conv: ConvId
   if (header.conv.t === 'dm') {
     if (!state.contacts[sender]?.friend) return
@@ -1255,6 +1268,9 @@ async function applyGroupOp(s: Session, sender: string, body: GroupOp, ts: numbe
     if (member === sender) return
     if (member === s.me) {
       await removeGroupLocally(s, g.id, false)
+      // Sync now: until the server's copy drops it, a reload would bring the group back.
+      clearTimeout(s.vaultTimer)
+      void pushVault(s)
       if (!s.fresh) state.error = `${displayName(sender)} removed you from “${g.name}”`
       return
     }
@@ -1431,7 +1447,7 @@ async function handlePayload(
       )
       return
     }
-    if (!existing.members.includes(sender)) return
+    if (!existing.members.includes(sender) || !isAdmin(existing, sender)) return
     // Updates can only add members; leaving is a separate, self-authored message.
     const added = proposed.filter((id) => !existing.members.includes(id))
     if (!added.length) return
@@ -1468,7 +1484,7 @@ async function handlePayload(
   }
 
   if (body.t === 'profile') {
-    if (mine || pc.t !== 'dm' || !s.pins[sender]) return
+    if (mine || pc.t !== 'dm' || !s.pins[sender] || state.blocked.some((b) => b.id === sender)) return
     await receiveProfile(s, sender, ts, body.mime, attachment)
     return
   }
@@ -1498,6 +1514,8 @@ async function handlePayload(
   if (!mine) await ensurePinned(s, [sender]).catch(noop)
 
   if (body.t === 'typing') return
+  // Blocked users stay in shared groups (so everyone's group state agrees), but I don't see what they say.
+  if (!mine && state.blocked.some((b) => b.id === sender)) return
   if (body.t === 'read') {
     await applyRead(s, conv, sender, Math.min(body.ts, ts))
     return
@@ -2201,6 +2219,7 @@ export async function addMembers(groupId: string, members: string[]) {
   const s = requireSession()
   const g = state.groups[groupId]
   if (!g) throw new Error('Group not found')
+  if (!isAdmin(g, s.me)) throw new Error('Only admins can add people')
   const added = [...new Set(members)].filter((id) => validId(id) && !g.members.includes(id) && state.contacts[id]?.friend)
   if (added.length === 0) return
   const all = [...g.members, ...added]
@@ -2220,6 +2239,11 @@ async function removeGroupLocally(s: Session, groupId: string, remember = true) 
   await delMany([K.conv(conv), ...list.filter((m) => m.kind === 'file').map((m) => K.file(m.id))], db)
   s.convs.delete(conv)
   s.dirtyConvs.delete(conv)
+  for (const [mid, f] of s.fileUrls) {
+    if (f.conv !== conv) continue
+    URL.revokeObjectURL(f.url)
+    s.fileUrls.delete(mid)
+  }
   delete state.groups[groupId]
   delete s.meta[conv]
   if (remember) s.left[groupId] = Date.now()

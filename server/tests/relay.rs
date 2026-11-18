@@ -367,21 +367,24 @@ async fn blocking_stops_requests_and_messages() {
     // Bob's new request looks sent to him but never reaches Alice.
     send(&mut b.ws, json!({"type": "friend_request", "req": 6, "id": a.id})).await;
     assert_eq!(recv_type(&mut b.ws, "ok").await["req"], 6);
-    // Alice can't send one to Bob while he's blocked.
+    // Alice can't send one to Bob, or accept his, while he's blocked.
     send(&mut a.ws, json!({"type": "friend_request", "req": 7, "id": b.id})).await;
     assert!(recv_type(&mut a.ws, "error").await["message"].as_str().unwrap().contains("Unblock"));
+    send(&mut a.ws, json!({"type": "friend_accept", "req": 10, "id": b.id})).await;
+    assert!(recv_type(&mut a.ws, "error").await["message"].as_str().unwrap().contains("Unblock"));
 
-    // A group message from Bob reaches Carol but not Alice.
+    // A direct message from Bob doesn't reach Alice; a group message still does (her client hides it),
+    // so group membership stays the same for everyone.
+    send(&mut b.ws, json!({"type": "send", "envelope": envelope("d1", &b.id, &[&a.id, &b.id])})).await;
     send(&mut b.ws, json!({"type": "send", "envelope": envelope("g1", &b.id, &[&a.id, &c.id, &b.id])})).await;
     assert_eq!(recv_type(&mut c.ws, "deliver").await["envelope"]["id"], "g1");
-    send(&mut c.ws, json!({"type": "send", "envelope": envelope("g2", &c.id, &[&a.id, &b.id, &c.id])})).await;
     let next = recv_type(&mut a.ws, "deliver").await;
-    assert_eq!(next["envelope"]["id"], "g2");
+    assert_eq!(next["envelope"]["id"], "g1");
     let mut later = resume(&url, &a.token, 0).await;
     let snap = recv_type(&mut later, "friends").await;
     assert!(snap["incoming"].as_array().unwrap().is_empty());
     let first = recv_type(&mut later, "deliver").await;
-    assert_eq!(first["envelope"]["id"], "g2");
+    assert_eq!(first["envelope"]["id"], "g1");
 
     // Unblocking lets requests through again.
     send(&mut a.ws, json!({"type": "unblock", "req": 8, "id": b.id})).await;

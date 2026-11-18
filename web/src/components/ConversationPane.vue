@@ -221,7 +221,7 @@ async function leave() {
                       <DropdownMenuItem v-else @select="setAdmin(m, true)"><ShieldCheck />Make admin</DropdownMenuItem>
                       <DropdownMenuSeparator />
                     </template>
-                    <DropdownMenuItem variant="destructive" @select="pendingAction = { kind: 'kick', id: m, group: group.id }"><UserMinus />Remove from group</DropdownMenuItem>
+                    <DropdownMenuItem variant="destructive" @select="membersOpen = false; pendingAction = { kind: 'kick', id: m, group: group.id }"><UserMinus />Remove from group</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
               </li>

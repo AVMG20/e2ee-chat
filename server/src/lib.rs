@@ -1054,6 +1054,10 @@ async fn handle_client_msg(
             send_text(socket, reply.map_or_else(|e| err(req, e), |()| ok(req))).await?;
         }
         ClientMsg::FriendAccept { req, id } => {
+            if state.has_blocked(my, &id)? {
+                send_text(socket, err(req, "You blocked this user. Unblock them first.")).await?;
+                return Ok(true);
+            }
             let accepted = {
                 let mut db = state.db.lock().unwrap();
                 let tx = db.transaction()?;
@@ -1147,7 +1151,10 @@ async fn handle_client_msg(
                 send_text(socket, failed("Invalid recipients")).await?;
                 return Ok(true);
             }
+            // Only one-to-one envelopes are held back from someone who blocked me. Group messages
+            // still reach them (their client hides them), so every member sees the same group state.
             let blockers = state.blocked_by(my)?;
+            let skip = |r: &str| blockers.contains(r) && recipients.iter().all(|x| *x == my || *x == r);
             let env_text = serde_json::to_string(&envelope)?;
             let size = env_text.len() as i64;
             let _order = state.send_order.lock().unwrap();
@@ -1178,7 +1185,7 @@ async fn handle_client_msg(
                         let seq = tx.last_insert_rowid();
                         {
                             let mut stmt = tx.prepare_cached("INSERT INTO inbox(user_id, msg_id) VALUES (?1, ?2)")?;
-                            for r in recipients.iter().filter(|r| !blockers.contains(**r)) {
+                            for r in recipients.iter().filter(|r| !skip(r)) {
                                 stmt.execute(params![r, seq])?;
                             }
                         }
@@ -1192,7 +1199,7 @@ async fn handle_client_msg(
                 Some(Err(e)) => failed(e),
                 Some(Ok(seq)) => {
                     let text = format!(r#"{{"type":"deliver","seq":{seq},"envelope":{env_text}}}"#);
-                    for r in recipients.iter().filter(|r| !blockers.contains(**r)) {
+                    for r in recipients.iter().filter(|r| !skip(r)) {
                         state.push_user(r, &text, None);
                     }
                     json!({"type": "sent", "id": meta.id, "seq": seq}).to_string()
@@ -1220,8 +1227,9 @@ async fn handle_client_msg(
                 return Ok(true);
             }
             let blockers = state.blocked_by(my)?;
+            let skip = |r: &str| blockers.contains(r) && recipients.iter().all(|x| *x == my || *x == r);
             let text = format!(r#"{{"type":"signal","envelope":{env_text}}}"#);
-            for r in recipients.iter().filter(|r| !blockers.contains(**r)) {
+            for r in recipients.iter().filter(|r| !skip(r)) {
                 state.push_user(r, &text, if *r == my { Some(session_id) } else { None });
             }
         }
