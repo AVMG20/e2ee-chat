@@ -35,6 +35,8 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional repo variable: server URL prefilled on first launch (e.g. https://chat.example.com).
+          VITE_DEFAULT_SERVER: ${{ vars.DEFAULT_SERVER }}
         with:
           projectPath: web
           tauriScript: bunx tauri
@@ -42,4 +44,4 @@ jobs:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseName: E2EE Chat ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseBody: Desktop apps for Windows, macOS and Linux. See the README for setup.
-          releaseDraft: true
+          releaseDraft: false

@@ -319,3 +319,25 @@ async fn security_headers_on_web_app() {
     assert!(lower.contains("frame-ancestors 'none'"));
     assert!(lower.contains("x-content-type-options: nosniff"));
 }
+
+#[tokio::test]
+async fn signals_are_relayed_live_but_never_stored() {
+    let (url, _dir) = start().await;
+    let mut a = register(&url, "alice", 1).await.unwrap();
+    let mut b = register(&url, "bob", 2).await.unwrap();
+    befriend(&mut a, &mut b).await;
+
+    send(&mut a.ws, json!({"type": "signal", "envelope": envelope("t1", &a.id, &[&b.id, &a.id])})).await;
+    assert_eq!(recv_type(&mut b.ws, "signal").await["envelope"]["id"], "t1");
+    // Rate limited: a second signal right away is dropped; a real message still goes through.
+    send(&mut a.ws, json!({"type": "signal", "envelope": envelope("t2", &a.id, &[&b.id])})).await;
+    send(&mut a.ws, json!({"type": "send", "envelope": envelope("m1", &a.id, &[&b.id])})).await;
+    let next = recv(&mut b.ws).await;
+    assert_eq!((next["type"].as_str(), next["envelope"]["id"].as_str()), (Some("deliver"), Some("m1")));
+
+    // A device that connects later gets the message but not the signal.
+    let mut later = resume(&url, &b.token, 0).await;
+    assert_eq!(recv_type(&mut later, "deliver").await["envelope"]["id"], "m1");
+    let synced = recv_type(&mut later, "synced").await;
+    assert!(synced["seq"].as_i64().is_some());
+}

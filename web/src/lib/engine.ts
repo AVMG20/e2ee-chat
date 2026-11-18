@@ -30,6 +30,7 @@ import {
   type ConvId,
   type FriendRequest,
   type Group,
+  type ReplyRef,
   MAX_FILE_BYTES,
   MIN_PASSWORD,
 } from './types'
@@ -40,10 +41,16 @@ import {
 
 type PayloadConv = { t: 'dm' } | { t: 'g'; id: string }
 type PayloadBody =
-  | { t: 'text'; doc: JSONContent }
-  | { t: 'file'; name: string; mime: string; size: number }
+  | { t: 'text'; doc: JSONContent; reply?: ReplyRef }
+  | { t: 'file'; name: string; mime: string; size: number; reply?: ReplyRef }
   | { t: 'group'; id: string; name: string; members: string[] }
   | { t: 'leave'; id: string }
+  /** Only the author's own messages can be edited or deleted (checked on receipt). */
+  | { t: 'edit'; target: string; doc: JSONContent }
+  | { t: 'delete'; target: string }
+  | { t: 'react'; target: string; emoji: string; on: boolean }
+  /** Sent as a signal (relayed live, never stored). */
+  | { t: 'typing' }
 interface PayloadHeader {
   conv: PayloadConv
   body: PayloadBody
@@ -91,11 +98,24 @@ function validHeader(h: PayloadHeader): boolean {
   if (!h || typeof h !== 'object' || !h.conv || !h.body) return false
   if (h.conv.t !== 'dm' && !(h.conv.t === 'g' && validGroupId(h.conv.id))) return false
   const b = h.body
+  const validDoc = (d: unknown): d is JSONContent =>
+    !!d && typeof d === 'object' && (d as JSONContent).type === 'doc' && docWithinLimits(d as JSONContent)
+  const validTarget = (t: unknown) => isStr(t) && t.length <= 64
+  const validReply = (r: unknown) =>
+    r === undefined || (!!r && typeof r === 'object' && validTarget((r as ReplyRef).id) && validId((r as ReplyRef).from) && isStr((r as ReplyRef).preview))
   switch (b.t) {
     case 'text':
-      return !!b.doc && typeof b.doc === 'object' && b.doc.type === 'doc' && docWithinLimits(b.doc)
+      return validDoc(b.doc) && validReply(b.reply)
     case 'file':
-      return isStr(b.name) && isStr(b.mime) && typeof b.size === 'number'
+      return isStr(b.name) && isStr(b.mime) && typeof b.size === 'number' && validReply(b.reply)
+    case 'edit':
+      return validTarget(b.target) && validDoc(b.doc)
+    case 'delete':
+      return validTarget(b.target)
+    case 'react':
+      return validTarget(b.target) && isStr(b.emoji) && b.emoji.length > 0 && b.emoji.length <= 16 && typeof b.on === 'boolean'
+    case 'typing':
+      return true
     case 'group':
       return validGroupId(b.id) && isStr(b.name) && isIdList(b.members)
     case 'leave':
@@ -204,6 +224,10 @@ export interface ChatState {
   active: ConvId | null
   messages: ChatMessage[]
   syncing: boolean
+  /** User IDs typing right now, per conversation. */
+  typing: Dict<string[]>
+  /** Id of the first message that was unread when the active conversation was opened. */
+  firstUnread: string | null
 }
 
 export const state = reactive<ChatState>({
@@ -217,6 +241,8 @@ export const state = reactive<ChatState>({
   active: null,
   messages: [],
   syncing: false,
+  typing: dict(),
+  firstUnread: null,
 })
 
 // ---------------------------------------------------------------------------
@@ -244,6 +270,7 @@ type ServerMsg =
   | { type: 'friends'; friends: ServerUser[]; incoming: FriendRequest[]; outgoing: FriendRequest[] }
   | { type: 'presence'; id: string; online: boolean }
   | { type: 'deliver'; seq: number; envelope: Envelope }
+  | { type: 'signal'; envelope: Envelope }
   | { type: 'synced'; seq: number }
   | { type: 'sent'; id: string; seq: number }
   | { type: 'failed'; id: string; message: string }
@@ -394,6 +421,10 @@ class Session {
   /** Incoming messages are processed one at a time, in order. */
   queue: Promise<unknown> = Promise.resolve()
   fileUrls = new Map<string, string>()
+  /** When I last sent a typing signal, and to which conversation. */
+  typingSent = { at: 0, conv: '' }
+  /** "<conv> <user>" → timer that clears that typing indicator. */
+  typingTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Envelope id → local message, for messages awaiting the server's "sent". */
   pendingSends = new Map<string, { conv: ConvId; mid: string }>()
   requests = new Map<number, { resolve: (m: ServerMsg) => void; reject: (e: Error) => void }>()
@@ -764,12 +795,21 @@ async function appendMessage(s: Session, m: ChatMessage, countUnread: boolean) {
   const meta = s.meta[m.conv] ?? { unread: 0, lastTs: 0, preview: '' }
   if (m.ts >= meta.lastTs) {
     meta.lastTs = m.ts
-    const prefix = m.conv.startsWith('g:') && m.kind !== 'system' ? `${m.from === s.me ? 'You' : displayName(m.from)}: ` : ''
-    meta.preview = prefix + previewOf(m)
+    meta.preview = previewLine(s, m)
   }
   if (countUnread && !s.fresh && state.active !== m.conv) meta.unread++
   s.meta[m.conv] = meta
   scheduleFlush(s)
+  if (m.from) stopTyping(m.conv, m.from)
+  if (countUnread && !s.fresh) {
+    for (const cb of incomingListeners) {
+      try {
+        cb(m)
+      } catch (e) {
+        console.warn('incoming listener failed', e)
+      }
+    }
+  }
 
   if (state.active === m.conv) {
     let j = state.messages.length
@@ -777,6 +817,111 @@ async function appendMessage(s: Session, m: ChatMessage, countUnread: boolean) {
     state.messages.splice(j, 0, m)
   }
   refreshConversations()
+}
+
+/** Sidebar preview: "alice: hi" in groups, "hi" in DMs. */
+function previewLine(s: Session, m: ChatMessage): string {
+  const prefix = m.conv.startsWith('g:') && m.kind !== 'system' ? `${m.from === s.me ? 'You' : displayName(m.from)}: ` : ''
+  return prefix + previewOf(m)
+}
+
+/**
+ * Applies an edit, delete or reaction to a message in `conv`. Edits and deletes only
+ * work on the author's own messages. Only call from inside serial(), or for my own changes.
+ */
+async function applyChange(s: Session, conv: ConvId, sender: string, body: PayloadBody, ts: number) {
+  if (body.t !== 'edit' && body.t !== 'delete' && body.t !== 'react') return
+  const list = await loadConv(s, conv)
+  if (!live(s)) return
+  const i = list.findIndex((x) => x.id === body.target)
+  const m = list[i]
+  if (!m || m.kind === 'system') return
+  // The same object as in `list`, through the reactive proxy when it's on screen.
+  const target = state.messages.find((x) => x.id === m.id && x.conv === conv) ?? m
+  if (body.t === 'react') {
+    const r = dict<string[]>(m.reactions)
+    const users = (r[body.emoji] ?? []).filter((u) => u !== sender)
+    if (body.on) {
+      if (!r[body.emoji] && Object.keys(r).length >= 20) return
+      users.push(sender)
+    }
+    if (users.length) r[body.emoji] = users
+    else delete r[body.emoji]
+    target.reactions = Object.keys(r).length ? r : undefined
+  } else if (m.from !== sender) {
+    return
+  } else if (body.t === 'edit') {
+    if (m.kind !== 'text') return
+    target.doc = body.doc
+    target.edited = ts
+  } else {
+    list.splice(i, 1)
+    const j = state.messages.findIndex((x) => x.id === m.id && x.conv === conv)
+    if (j >= 0) state.messages.splice(j, 1)
+    if (m.kind === 'file') {
+      await delMany([K.file(m.id)], db)
+      const url = s.fileUrls.get(m.id)
+      if (url) URL.revokeObjectURL(url)
+      s.fileUrls.delete(m.id)
+    }
+  }
+  s.dirtyConvs.add(conv)
+  const meta = s.meta[conv]
+  if (meta && body.t !== 'react') {
+    const last = list[list.length - 1]
+    meta.preview = last ? previewLine(s, last) : ''
+    refreshConversations()
+  }
+  scheduleFlush(s)
+}
+
+/** What a reply shows of the message it answers: my own copy if I have it. */
+async function resolveReply(s: Session, conv: ConvId, r: ReplyRef): Promise<ReplyRef> {
+  const local = (await loadConv(s, conv)).find((x) => x.id === r.id)
+  if (local) return { id: r.id, from: local.from, preview: previewOf(local).slice(0, 120) }
+  return { id: r.id.slice(0, 64), from: r.from, preview: cleanLabel(r.preview, 120) }
+}
+
+function stopTyping(conv: string, user: string) {
+  const key = `${conv} ${user}`
+  const t = session?.typingTimers.get(key)
+  if (t) clearTimeout(t)
+  session?.typingTimers.delete(key)
+  const list = state.typing[conv]
+  if (!list?.includes(user)) return
+  const rest = list.filter((u) => u !== user)
+  if (rest.length) state.typing[conv] = rest
+  else delete state.typing[conv]
+}
+
+/** A live typing signal: shown for a few seconds, never stored. */
+function handleSignal(s: Session, env: Envelope) {
+  if (!env || typeof env !== 'object' || !isStr(env.id) || !validId(env.from) || !Array.isArray(env.keys)) return
+  if (typeof env.ts !== 'number' || Math.abs(Date.now() - env.ts) > 30_000) return
+  const sender = env.from
+  const pin = s.pins[sender]
+  if (sender === s.me || !pin || state.contacts[sender]?.keyChanged) return
+  let header: PayloadHeader
+  try {
+    header = decodePayload(openEnvelope(s.identity, s.me, unb64(pin.signPk), env)).header
+  } catch {
+    return
+  }
+  if (!validHeader(header) || header.body.t !== 'typing') return
+  let conv: ConvId
+  if (header.conv.t === 'dm') {
+    if (!state.contacts[sender]?.friend) return
+    conv = `dm:${sender}`
+  } else {
+    const g = state.groups[header.conv.id]
+    if (!g || !g.members.includes(sender)) return
+    conv = `g:${g.id}`
+  }
+  const list = state.typing[conv] ?? []
+  if (!list.includes(sender)) state.typing[conv] = [...list, sender]
+  const key = `${conv} ${sender}`
+  clearTimeout(s.typingTimers.get(key))
+  s.typingTimers.set(key, setTimeout(() => live(s) && stopTyping(conv, sender), 6000))
 }
 
 async function systemMessage(s: Session, conv: ConvId, text: string, ts = Date.now()) {
@@ -975,7 +1120,14 @@ async function handlePayload(
   }
   if (!mine) await ensurePinned(s, [sender]).catch(noop)
 
+  if (body.t === 'typing') return
+  if (body.t === 'edit' || body.t === 'delete' || body.t === 'react') {
+    await applyChange(s, conv, sender, body, ts)
+    return
+  }
+
   const msg: ChatMessage = { id: mid, conv, from: sender, ts, kind: 'text', status: mine ? 'sent' : 'received' }
+  if (body.reply) msg.reply = await resolveReply(s, conv, body.reply)
   if (body.t === 'text') {
     msg.doc = body.doc
   } else {
@@ -1038,6 +1190,9 @@ function dispatch(s: Session, m: ServerMsg) {
       return
     }
     case 'pong':
+      return
+    case 'signal':
+      handleSignal(s, m.envelope)
       return
     case 'sent':
     case 'failed': {
@@ -1168,6 +1323,8 @@ function resetState() {
     active: null,
     messages: [],
     syncing: false,
+    typing: dict(),
+    firstUnread: null,
   } satisfies Partial<ChatState>)
 }
 
@@ -1250,7 +1407,7 @@ export const isDesktop = '__TAURI_INTERNALS__' in globalThis
 export function defaultServer(): string {
   if (!isDesktop) return location.origin
   try {
-    return localStorage.getItem(LS_SERVER) ?? ''
+    return localStorage.getItem(LS_SERVER) ?? ((import.meta.env.VITE_DEFAULT_SERVER as string | undefined) || '')
   } catch {
     return ''
   }
@@ -1450,13 +1607,24 @@ export async function openConv(conv: ConvId) {
   const s = requireSession()
   state.active = conv
   const meta = s.meta[conv]
+  const unread = meta?.unread ?? 0
   if (meta?.unread) {
     meta.unread = 0
     scheduleFlush(s)
     refreshConversations()
   }
   const list = await loadConv(s, conv)
-  if (session === s && state.active === conv) state.messages = list.slice()
+  if (session !== s || state.active !== conv) return
+  let firstUnread: string | null = null
+  for (let i = list.length - 1, n = unread; i >= 0 && n > 0; i--) {
+    const m = list[i]!
+    if (m.from && m.from !== s.me) {
+      firstUnread = m.id
+      n--
+    }
+  }
+  state.firstUnread = firstUnread
+  state.messages = list.slice()
 }
 
 function sendEnvelope(s: Session, to: string[], header: PayloadHeader, attachment?: Uint8Array, id = randomId(), ts = Date.now()) {
@@ -1501,6 +1669,7 @@ async function sendContent(header: (pc: PayloadConv) => PayloadHeader, local: Pa
   }
   if (!live(s)) return
   await appendMessage(s, msg, false)
+  if (state.active === conv) state.firstUnread = null // replying means I've read it
   s.pendingSends.set(id, { conv, mid })
   try {
     sendEnvelope(s, to, header(pc), attachment, id, ts)
@@ -1511,13 +1680,18 @@ async function sendContent(header: (pc: PayloadConv) => PayloadHeader, local: Pa
   }
 }
 
+function replyRef(m?: ChatMessage | null): ReplyRef | undefined {
+  if (!m || m.kind === 'system' || m.conv !== state.active) return undefined
+  return { id: m.id, from: m.from, preview: previewOf(m).slice(0, 120) }
+}
+
 export async function sendText(doc: JSONContent, replyTo?: ChatMessage | null) {
-  void replyTo
-  await sendContent((conv) => ({ conv, body: { t: 'text', doc } }), { kind: 'text', doc })
+  const reply = replyRef(replyTo)
+  await sendContent((conv) => ({ conv, body: { t: 'text', doc, reply } }), { kind: 'text', doc, reply })
 }
 
 export async function sendFile(file: File, replyTo?: ChatMessage | null) {
-  void replyTo
+  const reply = replyRef(replyTo)
   if (file.size > MAX_FILE_BYTES) {
     throw new Error(`File is too large (max ${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB)`)
   }
@@ -1525,8 +1699,8 @@ export async function sendFile(file: File, replyTo?: ChatMessage | null) {
   const name = cleanLabel(file.name, 200) || 'file'
   const mime = (file.type || 'application/octet-stream').slice(0, 100)
   await sendContent(
-    (conv) => ({ conv, body: { t: 'file', name, mime, size: bytes.length } }),
-    { kind: 'file', file: { name, mime, size: bytes.length } },
+    (conv) => ({ conv, body: { t: 'file', name, mime, size: bytes.length, reply } }),
+    { kind: 'file', file: { name, mime, size: bytes.length }, reply },
     bytes,
   )
 }
@@ -1608,18 +1782,52 @@ export async function leaveGroup(groupId: string) {
 export const desktopDownloadUrl: string =
   (import.meta.env.VITE_DOWNLOAD_URL as string | undefined) || 'https://github.com/AVMG20/e2ee-chat/releases/latest'
 
+async function sendChange(msg: ChatMessage, body: PayloadBody) {
+  const s = requireSession()
+  if (msg.kind === 'system') return
+  if (body.t !== 'react' && msg.from !== s.me) throw new Error('You can only change your own messages')
+  if (msg.status === 'failed' || msg.status === 'sending') {
+    // Never reached anyone (or not yet): a delete only needs to happen here.
+    if (body.t === 'delete' && msg.status === 'failed') return applyChange(s, msg.conv, s.me, body, Date.now())
+    throw new Error("This message hasn't been sent yet")
+  }
+  const { pc, to } = await targetsOf(s, msg.conv)
+  sendEnvelope(s, to, { conv: pc, body })
+  await applyChange(s, msg.conv, s.me, body, Date.now())
+}
+
 export async function editMessage(msg: ChatMessage, doc: JSONContent): Promise<void> {
-  void msg; void doc
-  throw new Error('not implemented')
+  if (msg.kind !== 'text') throw new Error('Only text messages can be edited')
+  if (!docWithinLimits(doc)) throw new Error('Message is too long')
+  await sendChange(msg, { t: 'edit', target: msg.id, doc })
 }
+
 export async function deleteMessage(msg: ChatMessage): Promise<void> {
-  void msg
-  throw new Error('not implemented')
+  await sendChange(msg, { t: 'delete', target: msg.id })
 }
+
 export async function react(msg: ChatMessage, emoji: string): Promise<void> {
-  void msg; void emoji
-  throw new Error('not implemented')
+  const s = requireSession()
+  const on = !msg.reactions?.[emoji]?.includes(s.me)
+  await sendChange(msg, { t: 'react', target: msg.id, emoji, on })
 }
+
+/** Tell the active conversation I'm typing. Call on input; throttled here. */
+export function typing() {
+  const s = session
+  const conv = state.active
+  if (!s || !conv || state.status !== 'online') return
+  const now = Date.now()
+  if (s.typingSent.conv === conv && now - s.typingSent.at < 3000) return
+  s.typingSent = { at: now, conv }
+  void targetsOf(s, conv)
+    .then(({ pc, to }) => {
+      const env = seal(s.identity, s.me, recipientKeys(s, to), encodePayload({ conv: pc, body: { t: 'typing' } }), randomId(), now)
+      s.conn?.send({ type: 'signal', envelope: env })
+    })
+    .catch(noop)
+}
+
 const incomingListeners = new Set<(m: ChatMessage) => void>()
 export function onIncoming(cb: (m: ChatMessage) => void): () => void {
   incomingListeners.add(cb)

@@ -11,7 +11,8 @@ export const chat = {
    * Reactive state:
    *   status, error, account (null when signed out), contacts (Dict by user ID),
    *   requests { incoming, outgoing }, groups, conversations, active, messages,
-   *   syncing (true while downloading history after sign-in).
+   *   syncing (true while downloading history after sign-in),
+   *   typing (conv → user IDs typing now), firstUnread (id of the first unread message when the active conv was opened).
    */
   state: engine.state,
   /** True inside the Tauri desktop app. */
@@ -61,6 +62,8 @@ export const chat = {
    * Use it for desktop notifications / sounds.
    */
   onIncoming: engine.onIncoming,
+  /** Call on composer input while there's text: tells the active conversation I'm typing (throttled). */
+  typing: engine.typing,
   /** Plain-text preview of a message, as shown in the sidebar. */
   previewText: engine.previewText,
   /** Where the desktop app can be downloaded. */

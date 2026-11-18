@@ -1,6 +1,7 @@
 import type { JSONContent } from '@tiptap/core'
 import { generateHTML } from '@tiptap/html'
 import DOMPurify from 'dompurify'
+import { highlightCode, languageName } from './code/highlight'
 import { editorExtensions } from './editor'
 
 const ALLOWED_TAGS = [
@@ -18,6 +19,12 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   if (isDesktop) node.removeAttribute('target')
   else node.setAttribute('target', '_blank')
   node.setAttribute('rel', 'noopener noreferrer nofollow')
+})
+
+// Code blocks keep their language as class="language-xyz" (nothing else may use class).
+const LANG_CLASS = /^language-([\w+#-]{1,20})$/
+DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+  if (data.attrName === 'class') data.keepAttr = node.tagName === 'CODE' && LANG_CLASS.test(data.attrValue)
 })
 
 /** Nesting/size limits for docs received from others (keeps rendering cheap and non-recursive-bomb). */
@@ -51,11 +58,25 @@ export function renderMessageHtml(doc: JSONContent | undefined): string {
   } catch {
     return ''
   }
-  return DOMPurify.sanitize(html, {
+  const frag = DOMPurify.sanitize(html, {
     ALLOWED_TAGS,
-    ALLOWED_ATTR: ['href'], // target/rel are set by the hook above
+    ALLOWED_ATTR: ['href', 'class'], // target/rel are set by the hook above; class only for code language
     ALLOWED_URI_REGEXP: /^(?:https?:|mailto:)/i,
+    RETURN_DOM_FRAGMENT: true,
   })
+  // Syntax highlighting: highlight.js escapes the code text and only adds <span class="hljs-…">.
+  for (const pre of frag.querySelectorAll('pre')) {
+    pre.classList.add('msg-code')
+    const code = pre.querySelector('code')
+    const lang = code?.className.match(LANG_CLASS)?.[1] ?? ''
+    const name = lang && languageName(lang)
+    if (name) pre.dataset.lang = name
+    const highlighted = code && highlightCode(code.textContent ?? '', lang)
+    if (code && highlighted !== null && highlighted !== undefined) code.innerHTML = highlighted
+  }
+  const box = document.createElement('div')
+  box.append(frag)
+  return box.innerHTML
 }
 
 /** Plain-text version of a message doc (for previews/notifications). */

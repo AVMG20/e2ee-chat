@@ -1,0 +1,15 @@
+/* Syntax colors for code blocks in messages (GitHub-like), light and dark. */
+.msg-code { --c-kw: #cf222e; --c-str: #0a3069; --c-num: #0550ae; --c-com: #6e7781; --c-fn: #8250df; --c-type: #953800; --c-tag: #116329; --c-attr: #0550ae; }
+.dark .msg-code { --c-kw: #ff7b72; --c-str: #a5d6ff; --c-num: #79c0ff; --c-com: #8b949e; --c-fn: #d2a8ff; --c-type: #ffa657; --c-tag: #7ee787; --c-attr: #79c0ff; }
+.msg-code .hljs-keyword, .msg-code .hljs-selector-tag, .msg-code .hljs-literal, .msg-code .hljs-built_in, .msg-code .hljs-doctag { color: var(--c-kw); }
+.msg-code .hljs-string, .msg-code .hljs-regexp, .msg-code .hljs-selector-attr, .msg-code .hljs-template-tag { color: var(--c-str); }
+.msg-code .hljs-number, .msg-code .hljs-symbol, .msg-code .hljs-variable, .msg-code .hljs-template-variable, .msg-code .hljs-meta { color: var(--c-num); }
+.msg-code .hljs-comment, .msg-code .hljs-quote { color: var(--c-com); font-style: italic; }
+.msg-code .hljs-title, .msg-code .hljs-title.function_, .msg-code .hljs-section { color: var(--c-fn); }
+.msg-code .hljs-type, .msg-code .hljs-title.class_, .msg-code .hljs-params { color: var(--c-type); }
+.msg-code .hljs-name, .msg-code .hljs-tag, .msg-code .hljs-selector-id, .msg-code .hljs-selector-class { color: var(--c-tag); }
+.msg-code .hljs-attr, .msg-code .hljs-attribute, .msg-code .hljs-property { color: var(--c-attr); }
+.msg-code .hljs-addition { color: var(--c-tag); }
+.msg-code .hljs-deletion { color: var(--c-kw); }
+.msg-code .hljs-emphasis { font-style: italic; }
+.msg-code .hljs-strong { font-weight: 600; }

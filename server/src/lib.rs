@@ -63,6 +63,9 @@ const MAX_VAULT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 4096;
 const MAX_RECIPIENTS: usize = 256;
 const MAX_PENDING_REQUESTS: i64 = 100;
+/// Signals (typing indicators) are tiny, and limited per session.
+const MAX_SIGNAL_BYTES: usize = 8 * 1024;
+const SIGNAL_INTERVAL: Duration = Duration::from_millis(500);
 /// Sessions (signed-in devices) unused for this long are deleted.
 const SESSION_IDLE_DAYS: i64 = 180;
 /// User IDs: 8 chars of Crockford base32 (no I, L, O, U).
@@ -149,6 +152,11 @@ enum ClientMsg {
     },
     /// `envelope` is opaque to the server apart from `id`, `from` and `keys[].to`.
     Send {
+        envelope: Value,
+    },
+    /// Like `Send`, but not stored: only relayed to recipients that are online right now
+    /// (typing indicators). Dropped silently when over the size or rate limit.
+    Signal {
         envelope: Value,
     },
     VaultPut {
@@ -762,6 +770,8 @@ struct Authed {
     /// Hash of this device's session token (deleted on logout).
     token_hash: Vec<u8>,
     ip: IpAddr,
+    /// When this session last relayed a signal (rate limit).
+    last_signal: Mutex<Option<Instant>>,
     /// Sent with the welcome message: token (new sessions) and locked keys (login).
     welcome: Value,
 }
@@ -843,7 +853,7 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
                 tracing::info!(user = %id, "registered");
                 let token = state.create_session(&id)?;
                 let token_hash = sha256(token.as_bytes());
-                return Ok(Some(Authed { id, username, cursor: 0, token_hash, ip, welcome: json!({"token": token}) }));
+                return Ok(Some(Authed { id, username, cursor: 0, token_hash, ip, last_signal: Mutex::new(None), welcome: json!({"token": token}) }));
             }
             ClientMsg::Login { username, auth_key, cursor } => {
                 let account = state.account_by_username(&username)?;
@@ -854,7 +864,7 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
                 let token = state.create_session(&a.id)?;
                 let token_hash = sha256(token.as_bytes());
                 let welcome = json!({"token": token, "bundle": a.bundle, "salt": a.salt});
-                return Ok(Some(Authed { id: a.id, username: a.username, cursor, token_hash, ip, welcome }));
+                return Ok(Some(Authed { id: a.id, username: a.username, cursor, token_hash, ip, last_signal: Mutex::new(None), welcome }));
             }
             ClientMsg::Resume { token, cursor } => {
                 let Some((id, username)) = state.resume_session(&token)? else {
@@ -862,7 +872,7 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
                     return Ok(None);
                 };
                 let token_hash = sha256(token.as_bytes());
-                return Ok(Some(Authed { id, username, cursor, token_hash, ip, welcome: json!({}) }));
+                return Ok(Some(Authed { id, username, cursor, token_hash, ip, last_signal: Mutex::new(None), welcome: json!({}) }));
             }
             _ => {
                 send_text(socket, err(0, "Sign in first")).await?;
@@ -1124,6 +1134,29 @@ async fn handle_client_msg(
             };
             drop(_order);
             send_text(socket, reply).await?;
+        }
+
+        ClientMsg::Signal { envelope } => {
+            {
+                let mut last = me.last_signal.lock().unwrap();
+                if last.is_some_and(|t| t.elapsed() < SIGNAL_INTERVAL) {
+                    return Ok(true);
+                }
+                *last = Some(Instant::now());
+            }
+            let Ok(meta) = serde_json::from_value::<EnvelopeMeta>(envelope.clone()) else { return Ok(true) };
+            let recipients: HashSet<&str> = meta.keys.iter().map(|k| k.to.as_str()).collect();
+            if meta.from != my || recipients.len() > MAX_RECIPIENTS || !recipients.iter().all(|r| valid_user_id(r)) {
+                return Ok(true);
+            }
+            let env_text = serde_json::to_string(&envelope)?;
+            if env_text.len() > MAX_SIGNAL_BYTES {
+                return Ok(true);
+            }
+            let text = format!(r#"{{"type":"signal","envelope":{env_text}}}"#);
+            for r in &recipients {
+                state.push_user(r, &text, if *r == my { Some(session_id) } else { None });
+            }
         }
 
         ClientMsg::VaultPut { req, vault } => {

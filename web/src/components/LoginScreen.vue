@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { AtSign, Globe, Loader2, Lock, LockKeyhole, Moon, Sun, TriangleAlert } from 'lucide-vue-next'
+import { AtSign, Download, Globe, Loader2, Lock, LockKeyhole, Moon, Sun, TriangleAlert } from 'lucide-vue-next'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { isDark, toggleTheme } from '@/lib/theme'
@@ -74,7 +74,7 @@ async function submit() {
       <div class="fade-up w-full max-w-[27rem] py-8">
         <div class="mb-7 flex flex-col items-center text-center">
           <div class="relative mb-5">
-                        <img src="/favicon.svg" alt="" class="relative size-16 rounded-2xl">
+            <img src="/favicon.svg" alt="" class="relative size-16 rounded-2xl">
           </div>
           <h1 class="text-2xl leading-none font-bold">E2EE Chat</h1>
           <p class="mt-2.5 max-w-xs text-[15px] leading-snug text-muted-foreground">Private chat for your own server. End-to-end encrypted.</p>
@@ -153,6 +153,11 @@ async function submit() {
         <p class="mt-5 flex items-start justify-center gap-2 px-6 text-center text-xs leading-relaxed text-muted-foreground">
           <Lock class="mt-0.5 size-3.5 shrink-0" />
           <span>Your keys are generated on this device. The server can never read your messages.</span>
+        </p>
+        <p v-if="!chat.isDesktop" class="mt-3 text-center">
+          <a :href="chat.desktopDownloadUrl" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 rounded text-xs font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:shadow-[var(--glow)]">
+            <Download class="size-3.5" />Download the desktop app
+          </a>
         </p>
       </div>
     </div>

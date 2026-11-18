@@ -10,7 +10,9 @@ encrypted blobs.
 - Add friends by their user ID (like `7K3Q-X9PA`), Discord style. Only friends can DM you or add you to a new group
 - Usernames keep their capitals (`AVMG`) but are unique and signed in to regardless of case
 - Direct messages and group chats (as many groups as you like)
-- Rich text (bold, italic, code, lists, quotes, links) with a Tiptap editor
+- Rich text (bold, italic, lists, quotes, links) and Discord-style code blocks (```` ```js ````) with syntax highlighting
+- Replies, reactions, editing and deleting your own messages, typing indicators, @mentions
+- Quick switcher (Ctrl/Cmd+K), a friends list, desktop notifications, light and dark themes
 - Encrypted file and image sharing (up to 10 MB)
 - Message history on every device you sign in to (kept encrypted on the server for 180 days)
 - Key fingerprints to verify each other, plus warnings if someone's key changes
@@ -49,10 +51,15 @@ Sending a message (DM or group):
    server can't forge, alter or re-route messages. Each device remembers which messages it has
    already processed and refuses repeats, so the server can't replay them either.
 
+Edits, deletions, reactions and typing indicators are encrypted, signed messages too; only
+the author can edit or delete a message. Typing indicators are relayed live and never stored.
+A deleted message disappears on every device, but its encrypted copy stays on the server until
+it expires.
+
 Groups exist only inside encrypted messages. The server never learns a group's name or id.
 
 **What the server *can* see:** usernames, user IDs, who is friends with whom, public keys, your IP
-address and when you're online, and for every message: who sent it, who it
+address and when you're online (and when you're typing to someone), and for every message: who sent it, who it
 goes to, when, and how big it is. A group message is sent to all members at once, so the server
 can see who tends to talk together (a likely member list), just not what the group is called or
 what is said.

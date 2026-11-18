@@ -1,9 +1,10 @@
-import { ref } from 'vue'
+import { onBeforeUnmount, ref } from 'vue'
 import { toast } from 'vue-sonner'
 
-/** Shared open-state for the Friends dialog (opened from the sidebar and the empty state). */
+/** Legacy trigger: setting this to true opens the Friends view (ChatLayout resets it). */
 export const friendsOpen = ref(false)
 export const accountOpen = ref(false)
+export const paletteOpen = ref(false)
 
 export async function copyText(text: string, what = 'Copied'): Promise<void> {
   try {
@@ -22,4 +23,18 @@ export async function copyText(text: string, what = 'Copied'): Promise<void> {
     }
   }
   toast.success(what)
+}
+
+/** Copy with a short-lived `copied` flag, for swapping a copy icon to a check. */
+export function useCopy(ms = 1500) {
+  const copied = ref(false)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  async function copy(text: string, what = 'ID copied') {
+    await copyText(text, what)
+    copied.value = true
+    clearTimeout(timer)
+    timer = setTimeout(() => (copied.value = false), ms)
+  }
+  onBeforeUnmount(() => clearTimeout(timer))
+  return { copied, copy }
 }

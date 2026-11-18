@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import {
-  ArrowLeft, Copy, Hash, Loader2, LogOut, MessageCircle, ShieldAlert, ShieldCheck, Upload, UserMinus, UserPlus, Users,
+  ArrowLeft, Copy, Ellipsis, Hash, Loader2, LogOut, MessageCircle, ShieldAlert, ShieldCheck, Upload, UserPlus, Users,
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import {
@@ -10,10 +10,12 @@ import {
 import AddMembersDialog from '@/components/AddMembersDialog.vue'
 import Composer from '@/components/Composer.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import FingerprintBlock from '@/components/FingerprintBlock.vue'
 import MessageList from '@/components/MessageList.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
-import VerifyDialog from '@/components/VerifyDialog.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { copyText, friendsOpen } from '@/lib/ui'
@@ -27,12 +29,10 @@ const convKey = computed(() => (conv.value ? conv.value.id.slice(conv.value.kind
 const hasFriends = computed(() => Object.values(chat.state.contacts).some((c) => c.friend))
 const myId = computed(() => chat.formatId(chat.state.account?.id ?? ''))
 const nameOf = (id: string) => chat.displayName(id)
-const removeOpen = ref(false)
 const group = computed(() =>
   conv.value?.kind === 'group' ? chat.state.groups[conv.value.id.slice(2)] ?? null : null,
 )
 
-const verifyOpen = ref(false)
 const membersOpen = ref(false)
 const addOpen = ref(false)
 const leaveOpen = ref(false)
@@ -53,7 +53,7 @@ function onDrop(e: DragEvent) {
   dragDepth.value = 0
   if (!conv.value) return
   const files = Array.from(e.dataTransfer?.files ?? [])
-  if (files.length) void composer.value?.sendFiles(files)
+  if (files.length) composer.value?.addFiles(files)
 }
 
 async function trust() {
@@ -66,20 +66,6 @@ async function trust() {
   busy.value = true
   try {
     await chat.trustNewKey(c.id, c.pendingFingerprint)
-  } catch (e) {
-    toast.error(errMsg(e))
-  } finally {
-    busy.value = false
-  }
-}
-
-async function removeFriend() {
-  const c = contact.value
-  if (!c) return
-  busy.value = true
-  try {
-    await chat.removeFriend(c.id)
-    removeOpen.value = false
   } catch (e) {
     toast.error(errMsg(e))
   } finally {
@@ -145,23 +131,20 @@ async function leave() {
           <h1 class="truncate text-[15px] font-bold">{{ conv.title }}</h1>
           <ShieldCheck v-if="contact?.verified" class="size-4 shrink-0 self-center text-success" title="Verified" />
           <span v-if="contact" class="hidden truncate text-xs text-muted-foreground sm:inline">{{ contact.online ? 'Online' : 'Offline' }}</span>
-          <span v-else-if="group" class="truncate text-xs text-muted-foreground">
-            <button class="hover:underline" @click="membersOpen = true">{{ group.members.length }} members</button>
-            <span class="mx-1">·</span>
-            <button class="font-medium text-[var(--link)] hover:underline" @click="addOpen = true">+ Add member</button>
-          </span>
+          <button v-else-if="group" class="truncate text-xs text-muted-foreground hover:text-foreground hover:underline" @click="membersOpen = true">{{ group.members.length }} members</button>
         </div>
 
-        <template v-if="contact">
-          <button class="btn btn-ghost btn-sm" title="Verify security key" @click="verifyOpen = true">
-            <ShieldCheck :class="contact.verified && 'text-success'" /><span class="hidden sm:inline">{{ contact.verified ? 'Verified' : 'Verify' }}</span>
-          </button>
-          <button class="btn btn-ghost btn-icon btn-sm hover:!text-destructive" title="Remove friend" aria-label="Remove friend" @click="removeOpen = true"><UserMinus /></button>
-        </template>
-        <template v-else-if="group">
-          <button class="btn btn-ghost btn-icon btn-sm" title="Members" aria-label="Members" @click="membersOpen = true"><Users /></button>
-          <button class="btn btn-ghost btn-icon btn-sm hover:!text-destructive" title="Leave group" aria-label="Leave group" @click="leaveOpen = true"><LogOut /></button>
-        </template>
+        <DropdownMenu v-if="group">
+          <DropdownMenuTrigger as-child>
+            <button class="btn btn-ghost btn-icon btn-sm" title="Group options" aria-label="Group options"><Ellipsis /></button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" class="w-48">
+            <DropdownMenuItem @select="membersOpen = true"><Users />Members</DropdownMenuItem>
+            <DropdownMenuItem @select="addOpen = true"><UserPlus />Add members</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" @select="leaveOpen = true"><LogOut />Leave group</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </header>
 
       <div
@@ -191,7 +174,7 @@ async function leave() {
 
       <MessageList />
 
-      <div class="shrink-0 px-3 pb-3 sm:px-4 sm:pb-4"><Composer ref="composer" :disabled="!!contact?.keyChanged" /></div>
+      <div class="shrink-0 px-3 pb-1 sm:px-4 sm:pb-2"><Composer ref="composer" :disabled="!!contact?.keyChanged" /></div>
 
       <Transition
         enter-active-class="transition-opacity duration-150" enter-from-class="opacity-0"
@@ -199,20 +182,9 @@ async function leave() {
       >
         <div v-if="dragDepth > 0" class="pointer-events-none absolute inset-3 z-30 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-primary bg-background/85 text-primary">
           <Upload class="size-9" />
-          <p class="text-lg font-bold">Drop files to send</p>
+          <p class="text-lg font-bold">Drop files to add them</p>
         </div>
       </Transition>
-
-      <VerifyDialog v-if="contact" v-model:open="verifyOpen" :contact="contact" />
-      <ConfirmDialog
-        v-if="contact"
-        v-model:open="removeOpen"
-        title="Remove friend?"
-        :description="`${contact.name} will be removed from your friends and this direct chat will no longer be available. You can add them again later with their ID.`"
-        confirm-label="Remove friend"
-        :loading="busy"
-        @confirm="removeFriend"
-      />
 
       <template v-if="group">
         <Dialog v-model:open="membersOpen">
