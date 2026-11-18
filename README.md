@@ -15,7 +15,7 @@ encrypted blobs.
 - Quick switcher (Ctrl/Cmd+K), a friends list, desktop notifications, light and dark themes
 - Encrypted file and image sharing (up to 10 MB)
 - Message history on every device you sign in to (kept encrypted on the server for 180 days)
-- Key fingerprints to verify each other, plus warnings if someone's key changes
+- Warnings if someone's key ever changes
 - One small Rust server binary with SQLite. No other services needed.
 
 MIT licensed. Built with Rust (axum, Tauri), Vue 3, shadcn-vue, Tiptap and the audited
@@ -64,13 +64,13 @@ goes to, when, and how big it is. A group message is sent to all members at once
 can see who tends to talk together (a likely member list), just not what the group is called or
 what is said.
 
-### Verifying your friends
+### Trusting your friends' keys
 
-The first time you see someone's key, the app trusts it ("trust on first use"). To rule out
-a malicious server swapping keys at that moment, open a DM, click **Verify**, and compare
-the fingerprint with your friend in person or on a call. If someone's key ever changes, the
-app holds that person's new messages until you accept the new key. Keys you've already pinned
-or verified on one device can't be swapped by the server on your other devices.
+The first time you see someone's key, the app trusts it ("trust on first use") and remembers it
+on all your devices, so the server can't swap it later. Keys don't change when someone reinstalls
+or changes their password, so if a friend's key ever does change, the app holds their new messages
+and warns you until you accept the new key. The one moment a malicious server could swap a key
+unnoticed is when you first add someone; there is no manual fingerprint check.
 
 ### Known limitations
 

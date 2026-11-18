@@ -13,7 +13,6 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import FingerprintBlock from '@/components/FingerprintBlock.vue'
 import MessageList from '@/components/MessageList.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
@@ -156,14 +155,9 @@ async function leave() {
           <ShieldAlert class="mt-0.5 size-5 shrink-0 text-destructive" />
           <p class="min-w-0 flex-1 leading-relaxed">
             <strong class="font-semibold text-destructive">{{ contact.name }}'s security key changed.</strong>
-            This could mean they reinstalled, or someone is impersonating them.
-            Compare this with {{ contact.name }} in person or on a call before trusting it.
+            Keys don't change when someone reinstalls or changes their password, so someone may be trying to impersonate them.
+            Check with {{ contact.name }} outside this app before trusting it.
           </p>
-        </div>
-        <div class="grid gap-3 sm:grid-cols-2">
-          <div class="opacity-70"><FingerprintBlock label="Previous key" :value="contact.fingerprint" compact /></div>
-          <FingerprintBlock v-if="contact.pendingFingerprint" label="New key" :value="contact.pendingFingerprint" tone="danger" compact />
-          <p v-else class="self-center text-xs text-muted-foreground">Waiting for the new key…</p>
         </div>
         <div class="flex justify-end">
           <button class="btn btn-danger btn-sm" :disabled="busy || !contact.pendingFingerprint" @click="trust">

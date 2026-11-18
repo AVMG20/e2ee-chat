@@ -4,12 +4,10 @@ import { Download, KeyRound, LogOut } from 'lucide-vue-next'
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
-import FingerprintBlock from '@/components/FingerprintBlock.vue'
 import CopyIdButton from '@/components/shell/CopyIdButton.vue'
 import Toggle from '@/components/shell/Toggle.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
-import { errMsg } from '@/lib/format'
 import { notifyDenied, notifyEnabled, notifySupported, setNotify, setSound, soundEnabled } from '@/lib/notify'
 import { toast } from 'vue-sonner'
 
@@ -22,14 +20,6 @@ const id = computed(() => chat.formatId(rawId.value))
 async function toggleNotify(on: boolean) {
   const result = await setNotify(on)
   if (on && !result) toast.error(notifySupported ? 'Notifications are blocked. Allow them in your browser settings.' : 'This browser does not support notifications.')
-}
-
-function fingerprint(): string {
-  try {
-    return chat.myFingerprint()
-  } catch (e) {
-    return errMsg(e)
-  }
 }
 </script>
 
@@ -49,9 +39,6 @@ function fingerprint(): string {
         </div>
         <CopyIdButton :id="rawId" label="Copy ID" />
       </div>
-
-      <FingerprintBlock label="Key fingerprint" :value="fingerprint()" />
-      <p class="-mt-3 text-xs text-muted-foreground">Share this with your contacts over a trusted channel so they can verify it is really you.</p>
 
       <div class="space-y-3.5">
         <div class="eyebrow">Notifications</div>

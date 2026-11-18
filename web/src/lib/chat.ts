@@ -75,8 +75,6 @@ export const chat = {
   /** Adds friends (user IDs) to a group. */
   addMembers: engine.addMembers,
   leaveGroup: engine.leaveGroup,
-  /** My own key fingerprint, formatted for display. */
-  myFingerprint: engine.myFingerprint,
   setVerified: engine.setVerified,
   /** Accept a contact's changed key: trustNewKey(userId, contact.pendingFingerprint). */
   trustNewKey: engine.trustNewKey,

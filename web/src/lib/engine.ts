@@ -1563,10 +1563,6 @@ export function removeFriend(id: string) {
   return friendOp('friend_remove', id)
 }
 
-export function myFingerprint(): string {
-  return fingerprint(requireSession().identity)
-}
-
 export async function setVerified(id: string, verified: boolean) {
   const s = requireSession()
   const pin = s.pins[id]
