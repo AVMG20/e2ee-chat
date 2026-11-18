@@ -46,15 +46,19 @@ use tower_http::{
 };
 
 /// Largest websocket message accepted (encrypted files are base64 inside JSON).
-pub const MAX_MESSAGE_BYTES: usize = 24 * 1024 * 1024;
+pub const MAX_MESSAGE_BYTES: usize = 15 * 1024 * 1024;
 /// Max bytes of messages one user can have stored (sent within the retention period).
 pub const MAX_USER_STORAGE: i64 = 512 * 1024 * 1024;
 /// Max bytes queued for sending to one connected client before it's considered too slow.
 const MAX_SESSION_BACKLOG: usize = 64 * 1024 * 1024;
 /// Max connections that haven't logged in yet.
 const MAX_PENDING_AUTH: usize = 64;
-/// Stored envelopes are sent this many at a time when a device catches up.
-const SYNC_PAGE: i64 = 32;
+/// Max connections per IP that haven't logged in yet.
+const MAX_PENDING_AUTH_PER_IP: u32 = 8;
+/// Max connected devices per user; the oldest is disconnected beyond this.
+const MAX_SESSIONS_PER_USER: usize = 10;
+/// Stored envelope ids are fetched this many at a time when a device catches up.
+const SYNC_PAGE: i64 = 256;
 const MAX_VAULT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 4096;
 const MAX_RECIPIENTS: usize = 256;
@@ -254,6 +258,10 @@ pub struct AppState {
     secret: String,
     next_session: AtomicU64,
     pending_auth: Arc<Semaphore>,
+    pending_per_ip: Mutex<HashMap<IpAddr, u32>>,
+    /// Held from storing a message until it's queued for every recipient, so
+    /// live deliveries always arrive in seq order.
+    send_order: Mutex<()>,
     auth_failures: Limiter,
     registrations: Limiter,
 }
@@ -315,7 +323,10 @@ impl AppState {
                  size INTEGER NOT NULL,
                  created_at INTEGER NOT NULL DEFAULT (unixepoch())
              );
-             CREATE INDEX IF NOT EXISTS messages_sender ON messages(sender);
+             -- Usernames keep their casing for display but are unique ignoring case.
+             CREATE UNIQUE INDEX IF NOT EXISTS accounts_username_nocase ON accounts(username COLLATE NOCASE);
+             DROP INDEX IF EXISTS messages_sender;
+             CREATE INDEX IF NOT EXISTS messages_sender_size ON messages(sender, size);
              CREATE INDEX IF NOT EXISTS messages_created ON messages(created_at);
              CREATE TABLE IF NOT EXISTS inbox (
                  user_id TEXT NOT NULL,
@@ -345,6 +356,8 @@ impl AppState {
             secret,
             next_session: AtomicU64::new(1),
             pending_auth: Arc::new(Semaphore::new(MAX_PENDING_AUTH)),
+            pending_per_ip: Mutex::new(HashMap::new()),
+            send_order: Mutex::new(()),
             auth_failures: Limiter::new(20, Duration::from_secs(600)),
             registrations: Limiter::new(10, Duration::from_secs(3600)),
         }))
@@ -369,7 +382,7 @@ impl AppState {
         let db = self.db.lock().unwrap();
         Ok(db
             .query_row(
-                "SELECT id, username, salt, auth_hash, bundle FROM accounts WHERE username = ?1",
+                "SELECT id, username, salt, auth_hash, bundle FROM accounts WHERE username = ?1 COLLATE NOCASE",
                 [username],
                 |r| {
                     Ok(Account {
@@ -395,8 +408,10 @@ impl AppState {
     }
 
     /// Public info for the given user IDs (unknown IDs are skipped).
-    fn users(&self, ids: &[String]) -> Result<Vec<Value>> {
-        let online: HashSet<String> = self.online.lock().unwrap().keys().cloned().collect();
+    /// `with_presence`: include online status (only for friends).
+    fn users(&self, ids: &[String], with_presence: bool) -> Result<Vec<Value>> {
+        let online: HashSet<String> =
+            if with_presence { self.online.lock().unwrap().keys().cloned().collect() } else { HashSet::new() };
         let db = self.db.lock().unwrap();
         let mut stmt = db.prepare_cached("SELECT id, username, sign_pk, enc_pk FROM accounts WHERE id = ?1")?;
         let mut out = Vec::new();
@@ -429,7 +444,7 @@ impl AppState {
 
     /// Friends (with keys and presence) plus pending requests both ways.
     fn friends_snapshot(&self, id: &str) -> Result<String> {
-        let friends = self.users(&self.friend_ids(id)?)?;
+        let friends = self.users(&self.friend_ids(id)?, true)?;
         let db = self.db.lock().unwrap();
         let requests = |sql: &str| -> Result<Vec<Value>> {
             let mut stmt = db.prepare_cached(sql)?;
@@ -494,6 +509,18 @@ impl AppState {
         }
     }
 
+    /// Disconnects a user's devices (except one).
+    fn kick_user(&self, user: &str, except: Option<u64>, reason: &'static str) {
+        let mut online = self.online.lock().unwrap();
+        if let Some(list) = online.get_mut(user) {
+            for s in list.iter_mut().filter(|s| Some(s.id) != except) {
+                if let Some(k) = s.kick.take() {
+                    let _ = k.send(reason);
+                }
+            }
+        }
+    }
+
     fn presence_changed(&self, user: &str, online: bool) {
         let text = json!({"type": "presence", "id": user, "online": online}).to_string();
         for friend in self.friend_ids(user).unwrap_or_default() {
@@ -505,7 +532,7 @@ impl AppState {
         let h = Sha256::new()
             .chain_update(self.secret.as_bytes())
             .chain_update(b"/salt/")
-            .chain_update(username.as_bytes())
+            .chain_update(username.to_ascii_lowercase().as_bytes())
             .finalize();
         B64.encode(&h[..16])
     }
@@ -556,20 +583,78 @@ pub fn router(state: Arc<AppState>, web_dir: Option<PathBuf>) -> Router {
         .layer(set(header::REFERRER_POLICY, "no-referrer"))
 }
 
+/// The address used for rate limits. X-Forwarded-For is only believed when
+/// TRUST_PROXY is set and the connection comes from a local/private address
+/// (the proxy); its last entry is the one the proxy added.
 fn client_ip(state: &AppState, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
-    if state.config.trust_proxy {
-        let forwarded = headers
+    let peer_ip = canonical_ip(peer.ip());
+    let from_proxy = match peer_ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+    };
+    let mut ip = peer_ip;
+    if state.config.trust_proxy && from_proxy {
+        let last = headers
             .get_all("x-forwarded-for")
             .iter()
             .filter_map(|v| v.to_str().ok())
             .flat_map(|v| v.split(','))
-            .filter_map(|s| s.trim().parse().ok())
             .last();
-        if let Some(ip) = forwarded {
-            return ip;
+        if let Some(Ok(forwarded)) = last.map(|s| s.trim().parse::<IpAddr>()) {
+            ip = canonical_ip(forwarded);
         }
     }
-    peer.ip()
+    limit_key(ip)
+}
+
+fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    }
+}
+
+/// IPv6 users get a whole /64, so limits apply per /64 rather than per address.
+fn limit_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+        }
+        v4 => v4,
+    }
+}
+
+/// A connection in the login handshake: holds a global slot and a per-IP slot.
+struct PendingAuth {
+    _permit: OwnedSemaphorePermit,
+    state: Arc<AppState>,
+    ip: IpAddr,
+}
+
+impl PendingAuth {
+    fn new(state: &Arc<AppState>, ip: IpAddr) -> Option<Self> {
+        let permit = state.pending_auth.clone().try_acquire_owned().ok()?;
+        let mut per_ip = state.pending_per_ip.lock().unwrap();
+        let n = per_ip.entry(ip).or_insert(0);
+        if *n >= MAX_PENDING_AUTH_PER_IP {
+            return None;
+        }
+        *n += 1;
+        Some(Self { _permit: permit, state: state.clone(), ip })
+    }
+}
+
+impl Drop for PendingAuth {
+    fn drop(&mut self) {
+        let mut per_ip = self.state.pending_per_ip.lock().unwrap();
+        if let Some(n) = per_ip.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                per_ip.remove(&self.ip);
+            }
+        }
+    }
 }
 
 async fn ws_handler(
@@ -579,10 +664,10 @@ async fn ws_handler(
     headers: HeaderMap,
 ) -> Response {
     // Bound the number of sockets sitting in the login handshake.
-    let Ok(permit) = state.pending_auth.clone().try_acquire_owned() else {
+    let ip = client_ip(&state, peer, &headers);
+    let Some(permit) = PendingAuth::new(&state, ip) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "busy, try again").into_response();
     };
-    let ip = client_ip(&state, peer, &headers);
     ws.max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
@@ -608,7 +693,7 @@ pub async fn serve(addr: SocketAddr, app: Router) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn valid_username(name: &str) -> bool {
-    let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let alnum = |b: u8| b.is_ascii_alphanumeric();
     (3..=24).contains(&name.len())
         && name.bytes().next().is_some_and(alnum)
         && name.bytes().all(|b| alnum(b) || b == b'_' || b == b'.')
@@ -674,6 +759,9 @@ struct Authed {
     id: String,
     username: String,
     cursor: i64,
+    /// Hash of this device's session token (deleted on logout).
+    token_hash: Vec<u8>,
+    ip: IpAddr,
     /// Sent with the welcome message: token (new sessions) and locked keys (login).
     welcome: Value,
 }
@@ -687,8 +775,10 @@ async fn fail_auth(socket: &mut WebSocket, state: &AppState, ip: IpAddr, message
 
 /// Runs the login handshake. Returns the authenticated user.
 async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> Result<Option<Authed>> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    for _ in 0..5 {
+    let start = tokio::time::Instant::now();
+    for i in 0..5 {
+        // The first message must come quickly; the whole handshake within a minute.
+        let deadline = start + Duration::from_secs(if i == 0 { 10 } else { 60 });
         let Ok(Ok(Some(msg))) = tokio::time::timeout_at(deadline, recv_client(socket)).await else {
             return Ok(None);
         };
@@ -706,7 +796,7 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
             }
             ClientMsg::Register { username, salt, auth_key, sign_pk, enc_pk, bundle } => {
                 if !valid_username(&username) {
-                    send_text(socket, err(0, "Username must be 3-24 characters: a-z, 0-9, _ and .")).await?;
+                    send_text(socket, err(0, "Username must be 3-24 characters: letters, digits, _ and .")).await?;
                     return Ok(None);
                 }
                 let keys_ok = decode_len(&salt, 16).is_some()
@@ -736,7 +826,7 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
                             break;
                         }
                         let taken: bool = db
-                            .query_row("SELECT 1 FROM accounts WHERE username = ?1", [&username], |_| Ok(()))
+                            .query_row("SELECT 1 FROM accounts WHERE username = ?1 COLLATE NOCASE", [&username], |_| Ok(()))
                             .optional()?
                             .is_some();
                         if taken {
@@ -752,7 +842,8 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
                 state.registrations.hit(ip);
                 tracing::info!(user = %id, "registered");
                 let token = state.create_session(&id)?;
-                return Ok(Some(Authed { id, username, cursor: 0, welcome: json!({"token": token}) }));
+                let token_hash = sha256(token.as_bytes());
+                return Ok(Some(Authed { id, username, cursor: 0, token_hash, ip, welcome: json!({"token": token}) }));
             }
             ClientMsg::Login { username, auth_key, cursor } => {
                 let account = state.account_by_username(&username)?;
@@ -761,15 +852,17 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
                     return Ok(None);
                 };
                 let token = state.create_session(&a.id)?;
+                let token_hash = sha256(token.as_bytes());
                 let welcome = json!({"token": token, "bundle": a.bundle, "salt": a.salt});
-                return Ok(Some(Authed { id: a.id, username: a.username, cursor, welcome }));
+                return Ok(Some(Authed { id: a.id, username: a.username, cursor, token_hash, ip, welcome }));
             }
             ClientMsg::Resume { token, cursor } => {
                 let Some((id, username)) = state.resume_session(&token)? else {
                     fail_auth(socket, state, ip, "Session expired. Sign in again.").await?;
                     return Ok(None);
                 };
-                return Ok(Some(Authed { id, username, cursor, welcome: json!({}) }));
+                let token_hash = sha256(token.as_bytes());
+                return Ok(Some(Authed { id, username, cursor, token_hash, ip, welcome: json!({}) }));
             }
             _ => {
                 send_text(socket, err(0, "Sign in first")).await?;
@@ -780,7 +873,7 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
     Ok(None)
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, permit: OwnedSemaphorePermit, ip: IpAddr) -> Result<()> {
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, permit: PendingAuth, ip: IpAddr) -> Result<()> {
     let authed = authenticate(&mut socket, &state, ip).await;
     drop(permit);
     let Some(me) = authed? else {
@@ -795,6 +888,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, permit: Owne
     let came_online = {
         let mut online = state.online.lock().unwrap();
         let list = online.entry(me.id.clone()).or_default();
+        if list.len() >= MAX_SESSIONS_PER_USER {
+            let mut oldest = list.remove(0);
+            if let Some(k) = oldest.kick.take() {
+                let _ = k.send("Signed in on too many devices at once");
+            }
+        }
         list.push(Session { id: session_id, tx, budget, kick: Some(kick) });
         list.len() == 1
     };
@@ -845,19 +944,24 @@ async fn run_session(
     // with a seq it has already seen.
     let mut after = me.cursor.max(0);
     loop {
-        let page: Vec<(i64, String)> = {
+        let page: Vec<i64> = {
             let db = state.db.lock().unwrap();
             let mut stmt = db.prepare_cached(
-                "SELECT m.id, m.envelope FROM inbox i JOIN messages m ON m.id = i.msg_id
-                 WHERE i.user_id = ?1 AND i.msg_id > ?2 ORDER BY i.msg_id LIMIT ?3",
+                "SELECT msg_id FROM inbox WHERE user_id = ?1 AND msg_id > ?2 ORDER BY msg_id LIMIT ?3",
             )?;
-            stmt.query_map(params![me.id, after, SYNC_PAGE], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?
+            stmt.query_map(params![me.id, after, SYNC_PAGE], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
         };
-        let Some(&(last, _)) = page.last() else { break };
+        let Some(&last) = page.last() else { break };
         after = last;
-        for (seq, env) in page {
-            send_text(socket, format!(r#"{{"type":"deliver","seq":{seq},"envelope":{env}}}"#)).await?;
+        // One envelope in memory at a time (they can be several MB each).
+        for seq in page {
+            let env: Option<String> = {
+                let db = state.db.lock().unwrap();
+                db.query_row("SELECT envelope FROM messages WHERE id = ?1", [seq], |r| r.get(0)).optional()?
+            };
+            if let Some(env) = env {
+                send_text(socket, format!(r#"{{"type":"deliver","seq":{seq},"envelope":{env}}}"#)).await?;
+            }
         }
     }
     send_text(socket, json!({"type": "synced", "seq": after}).to_string()).await?;
@@ -946,7 +1050,7 @@ async fn handle_client_msg(
 
         ClientMsg::Lookup { req, ids } => {
             let ids: Vec<String> = ids.into_iter().filter(|i| valid_user_id(i)).take(MAX_RECIPIENTS).collect();
-            let users = state.users(&ids)?;
+            let users = state.users(&ids, false)?;
             send_text(socket, json!({"type": "users", "req": req, "users": users}).to_string()).await?;
         }
 
@@ -970,6 +1074,7 @@ async fn handle_client_msg(
             }
             let env_text = serde_json::to_string(&envelope)?;
             let size = env_text.len() as i64;
+            let _order = state.send_order.lock().unwrap();
             let seq = {
                 let mut db = state.db.lock().unwrap();
                 let tx = db.transaction()?;
@@ -1006,20 +1111,19 @@ async fn handle_client_msg(
                     }
                 }
             };
-            match seq {
-                None => {
-                    send_text(socket, failed("You've used all your message storage. Old messages expire over time."))
-                        .await?
-                }
-                Some(Err(e)) => send_text(socket, failed(e)).await?,
+            let reply = match seq {
+                None => failed("You've used all your message storage. Old messages expire over time."),
+                Some(Err(e)) => failed(e),
                 Some(Ok(seq)) => {
                     let text = format!(r#"{{"type":"deliver","seq":{seq},"envelope":{env_text}}}"#);
                     for r in &recipients {
                         state.push_user(r, &text, None);
                     }
-                    send_text(socket, json!({"type": "sent", "id": meta.id, "seq": seq}).to_string()).await?;
+                    json!({"type": "sent", "id": meta.id, "seq": seq}).to_string()
                 }
-            }
+            };
+            drop(_order);
+            send_text(socket, reply).await?;
         }
 
         ClientMsg::VaultPut { req, vault } => {
@@ -1036,8 +1140,13 @@ async fn handle_client_msg(
         }
 
         ClientMsg::Password { req, auth_key, new_salt, new_auth_key, bundle } => {
+            if !state.auth_failures.allowed(me.ip) {
+                send_text(socket, err(req, "Too many failed attempts. Try again in a few minutes.")).await?;
+                return Ok(true);
+            }
             let account = state.account_by_username(&me.username)?;
             if !account.is_some_and(|a| auth_matches(&a, &auth_key)) {
+                state.auth_failures.hit(me.ip);
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 send_text(socket, err(req, "Current password is wrong")).await?;
                 return Ok(true);
@@ -1054,15 +1163,18 @@ async fn handle_client_msg(
                     "UPDATE accounts SET salt = ?1, auth_hash = ?2, bundle = ?3 WHERE id = ?4",
                     params![new_salt, sha256(&new_auth), bundle, my],
                 )?;
+                // A new password signs out every other device.
+                db.execute("DELETE FROM sessions WHERE user_id = ?1 AND token_hash != ?2", params![my, me.token_hash])?;
             }
+            state.kick_user(my, Some(session_id), "Your password was changed. Sign in again.");
             send_text(socket, ok(req)).await?;
         }
 
         ClientMsg::Logout => {
             // Only this device's session ends; other devices stay signed in.
-            if let Some(token) = me.welcome.get("token").and_then(Value::as_str) {
+            {
                 let db = state.db.lock().unwrap();
-                db.execute("DELETE FROM sessions WHERE token_hash = ?1", [sha256(token.as_bytes())])?;
+                db.execute("DELETE FROM sessions WHERE token_hash = ?1", [&me.token_hash])?;
             }
             return Ok(false);
         }

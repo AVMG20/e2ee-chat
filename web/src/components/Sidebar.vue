@@ -1,43 +1,31 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { ChevronRight, Loader2, LogOut, Moon, Plus, Search, SearchX, Settings2, Sun, TriangleAlert, UserPlus } from 'lucide-vue-next'
+import { ChevronRight, Copy, Hash, Loader2, Moon, Plus, Search, Settings, Sun, TriangleAlert, UserPlus, Users } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
-import AccountDialog from '@/components/AccountDialog.vue'
-import ChangePasswordDialog from '@/components/ChangePasswordDialog.vue'
-import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import FriendsDialog from '@/components/FriendsDialog.vue'
 import NewGroupDialog from '@/components/NewGroupDialog.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
-import { errMsg, relTime } from '@/lib/format'
+import { errMsg } from '@/lib/format'
 import { isDark, toggleTheme } from '@/lib/theme'
-import { friendsOpen } from '@/lib/ui'
+import { accountOpen, copyText, friendsOpen } from '@/lib/ui'
 import type { Conversation } from '@/lib/types'
 
 const emit = defineEmits<{ selected: [] }>()
 
-const accountOpen = ref(false)
-const pwOpen = ref(false)
-const signOutOpen = ref(false)
-const signingOut = ref(false)
-const incomingCount = computed(() => chat.state.requests.incoming.length)
 const groupOpen = ref(false)
 const query = ref('')
+const incomingCount = computed(() => chat.state.requests.incoming.length)
+const myId = computed(() => chat.formatId(chat.state.account?.id ?? ''))
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
   return chat.state.conversations.filter((c) => !q || c.title.toLowerCase().includes(q))
 })
-const sections = computed(() => [
-  { title: 'Groups', items: filtered.value.filter((c) => c.kind === 'group') },
-  { title: 'Direct messages', items: filtered.value.filter((c) => c.kind === 'dm') },
-].filter((s) => s.items.length))
+const dms = computed(() => filtered.value.filter((c) => c.kind === 'dm'))
+const groups = computed(() => filtered.value.filter((c) => c.kind === 'group'))
 
-const statusText = computed(() => ({ online: 'Online', connecting: 'Connecting…', offline: 'Offline' })[chat.state.status])
-
-function contactOf(c: Conversation) {
-  return c.kind === 'dm' ? chat.state.contacts[c.id.slice(3)] : undefined
-}
+const contactOf = (c: Conversation) => (c.kind === 'dm' ? chat.state.contacts[c.id.slice(3)] : undefined)
+const idOf = (c: Conversation) => c.id.slice(c.kind === 'dm' ? 3 : 2)
 
 async function select(c: Conversation) {
   emit('selected')
@@ -47,130 +35,100 @@ async function select(c: Conversation) {
     toast.error(errMsg(e))
   }
 }
-
-const idOf = (c: Conversation) => c.id.slice(c.kind === 'dm' ? 3 : 2)
-
-async function signOut() {
-  signingOut.value = true
-  try {
-    await chat.logout()
-  } catch (e) {
-    toast.error(errMsg(e))
-  } finally {
-    signingOut.value = false
-    signOutOpen.value = false
-  }
-}
 </script>
 
 <template>
   <aside class="flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
-    <header class="flex items-center gap-3 px-4 pt-4 pb-3">
-      <img src="/favicon.svg" alt="" class="size-9 rounded-xl shadow-md ring-1 ring-line">
-      <div class="min-w-0 flex-1 leading-tight">
-        <h1 class="text-[15px] font-semibold">E2EE Chat</h1>
-        <p class="text-[11px] text-muted-foreground">End-to-end encrypted</p>
-      </div>
-      <button class="btn btn-soft btn-icon relative" title="Friends" aria-label="Friends" @click="friendsOpen = true">
-        <UserPlus />
-        <span v-if="incomingCount" class="unread absolute -top-1.5 -right-1.5 !min-w-[1.1rem] !h-[1.1rem] !px-1 !text-[10px] shadow-[0_0_0_2px_var(--sidebar)]">{{ incomingCount }}</span>
-      </button>
-      <button class="btn btn-soft btn-icon" title="New group" aria-label="New group" @click="groupOpen = true"><Plus /></button>
-    </header>
-
-    <div class="px-3 pb-3">
-      <div class="field-icon">
+    <div class="flex h-12 shrink-0 items-center gap-1.5 border-b border-sidebar-border px-2.5">
+      <div class="field-icon min-w-0 flex-1">
         <Search />
-        <input v-model="query" type="search" placeholder="Search chats" aria-label="Search conversations" class="field !h-10 !rounded-xl !text-sm">
+        <input v-model="query" type="search" placeholder="Search" aria-label="Search conversations" class="field !h-8 !rounded-md !text-sm">
+      </div>
+      <!-- the icon rail is hidden on small screens, so its actions live here -->
+      <div class="flex items-center md:hidden">
+        <button class="btn btn-ghost btn-icon btn-sm relative" title="Friends" aria-label="Friends" @click="friendsOpen = true">
+          <Users />
+          <span v-if="incomingCount" class="unread absolute -top-1 -right-1 !bg-destructive">{{ incomingCount }}</span>
+        </button>
+        <button class="btn btn-ghost btn-icon btn-sm" aria-label="Toggle theme" @click="toggleTheme"><Sun v-if="isDark" /><Moon v-else /></button>
       </div>
     </div>
 
     <button
       v-if="incomingCount"
-      class="mx-3 mb-2 flex items-center gap-3 rounded-2xl p-3 text-left text-sm shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--accent-from)_30%,transparent)] transition-colors [background:linear-gradient(90deg,color-mix(in_oklab,var(--accent-from)_16%,transparent),color-mix(in_oklab,var(--accent-to)_6%,transparent))] hover:brightness-110"
+      class="mx-2 mt-2 flex items-center gap-2.5 rounded-md bg-primary/15 px-2.5 py-2 text-left text-[13px] transition-colors hover:bg-primary/25"
       @click="friendsOpen = true"
     >
-      <span class="flex size-8 shrink-0 items-center justify-center rounded-xl text-white [background:var(--grad)]"><UserPlus class="size-4" /></span>
+      <UserPlus class="size-4 shrink-0 text-primary" />
       <span class="flex-1 font-semibold">{{ incomingCount }} friend {{ incomingCount === 1 ? 'request' : 'requests' }}</span>
       <ChevronRight class="size-4 text-muted-foreground" />
     </button>
 
-    <div v-if="chat.state.syncing" class="mx-4 mb-2 flex items-center gap-2 text-xs text-muted-foreground" role="status">
+    <div v-if="chat.state.syncing" class="mx-3 mt-2 flex items-center gap-2 text-xs text-muted-foreground" role="status">
       <Loader2 class="size-3.5 animate-spin" />Syncing messages…
     </div>
 
-    <nav class="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-      <div v-if="!filtered.length" class="flex flex-col items-center gap-3 px-4 py-14 text-center text-sm text-muted-foreground">
-        <SearchX class="size-8 opacity-40" />
-        <template v-if="query">No matching chats.</template>
-        <template v-else>
-          No conversations yet.
-          <button class="btn btn-soft btn-sm" @click="friendsOpen = true"><UserPlus />Add a friend</button>
-        </template>
-      </div>
-
-      <section v-for="section in sections" :key="section.title" class="mb-3">
-        <h2 class="eyebrow px-3 pt-2 pb-1.5">{{ section.title }}</h2>
-        <ul class="space-y-0.5">
-          <li v-for="c in section.items" :key="c.id">
+    <nav class="min-h-0 flex-1 overflow-y-auto px-2 pt-2 pb-2">
+      <section class="mb-3">
+        <div class="flex items-center justify-between px-1.5 pt-2 pb-1">
+          <h2 class="eyebrow">Direct messages</h2>
+          <button class="btn btn-ghost btn-icon btn-sm !size-5" title="Add friend" aria-label="Add friend" @click="friendsOpen = true"><Plus class="!size-4" /></button>
+        </div>
+        <p v-if="!dms.length" class="px-2 py-1.5 text-[13px] text-muted-foreground">
+          {{ query ? 'No matches.' : 'No friends yet. Share your ID or add one.' }}
+        </p>
+        <ul class="space-y-px">
+          <li v-for="c in dms" :key="c.id">
             <button
-              class="row flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left outline-none focus-visible:shadow-[var(--glow)]"
-              :data-active="chat.state.active === c.id"
-              :style="{ '--dot-ring': 'var(--sidebar)' }"
+              class="row flex h-[2.6rem] w-full items-center gap-2.5 rounded-md px-2 text-left outline-none focus-visible:shadow-[var(--glow)]"
+              :data-active="chat.state.active === c.id" :data-unread="c.unread > 0" :title="c.preview"
+              :style="{ '--dot-ring': chat.state.active === c.id ? 'var(--active)' : 'var(--sidebar)' }"
               @click="select(c)"
             >
-              <UserAvatar :name="c.title" :id="idOf(c)" :size="42" :online="contactOf(c)?.online" />
-              <div class="min-w-0 flex-1">
-                <div class="flex items-baseline gap-2">
-                  <span class="flex-1 truncate text-[14.5px] font-semibold">{{ c.title }}</span>
-                  <span class="shrink-0 text-[11px] tabular-nums" :class="c.unread > 0 ? 'font-semibold text-primary' : 'text-muted-foreground'">
-                    {{ relTime(c.lastTs) }}
-                  </span>
-                </div>
-                <div class="mt-0.5 flex items-center gap-2">
-                  <span class="flex-1 truncate text-[13px]" :class="c.unread > 0 ? 'text-foreground/80' : 'text-muted-foreground'">
-                    {{ c.preview || (c.kind === 'group' ? 'No messages yet' : 'Say hi') }}
-                  </span>
-                  <TriangleAlert v-if="contactOf(c)?.keyChanged" class="size-4 shrink-0 text-destructive" />
-                  <span v-if="c.unread > 0" class="unread shrink-0">{{ c.unread > 99 ? '99+' : c.unread }}</span>
-                </div>
-              </div>
+              <UserAvatar :name="c.title" :id="idOf(c)" :size="32" :online="contactOf(c)?.online" />
+              <span class="min-w-0 flex-1 truncate text-[15px]" :class="c.unread > 0 ? 'font-semibold' : 'font-medium'">{{ c.title }}</span>
+              <TriangleAlert v-if="contactOf(c)?.keyChanged" class="size-4 shrink-0 text-destructive" />
+              <span v-if="c.unread > 0" class="unread shrink-0">{{ c.unread > 99 ? '99+' : c.unread }}</span>
+            </button>
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="flex items-center justify-between px-1.5 pt-2 pb-1">
+          <h2 class="eyebrow">Groups</h2>
+          <button class="btn btn-ghost btn-icon btn-sm !size-5" title="New group" aria-label="New group" @click="groupOpen = true"><Plus class="!size-4" /></button>
+        </div>
+        <p v-if="!groups.length" class="px-2 py-1.5 text-[13px] text-muted-foreground">{{ query ? 'No matches.' : 'No groups yet.' }}</p>
+        <ul class="space-y-px">
+          <li v-for="c in groups" :key="c.id">
+            <button
+              class="row flex h-9 w-full items-center gap-2 rounded-md px-2 text-left outline-none focus-visible:shadow-[var(--glow)]"
+              :data-active="chat.state.active === c.id" :data-unread="c.unread > 0" :title="c.preview"
+              @click="select(c)"
+            >
+              <Hash class="size-5 shrink-0 opacity-60" />
+              <span class="min-w-0 flex-1 truncate text-[15px]" :class="c.unread > 0 ? 'font-semibold' : 'font-medium'">{{ c.title }}</span>
+              <span v-if="c.unread > 0" class="unread shrink-0">{{ c.unread > 99 ? '99+' : c.unread }}</span>
             </button>
           </li>
         </ul>
       </section>
     </nav>
 
-    <div class="p-3 pt-0">
-      <div class="well flex items-center gap-3 rounded-2xl p-2.5">
-        <UserAvatar
-          :name="chat.state.account?.username ?? '?'" :id="chat.state.account?.id" :size="38"
-          :online="chat.state.status === 'online'"
-          style="--dot-ring: var(--card)"
-        />
-        <div class="min-w-0 flex-1 leading-tight">
-          <div class="truncate text-sm font-semibold">{{ chat.state.account?.username }}</div>
-          <div class="mt-0.5 truncate font-mono text-[11px] tracking-wider text-muted-foreground" :title="statusText">{{ chat.formatId(chat.state.account?.id ?? '') }}</div>
-        </div>
-        <button class="btn btn-ghost btn-icon btn-sm" title="Account" aria-label="Account" @click="accountOpen = true"><Settings2 /></button>
-        <button class="btn btn-ghost btn-icon btn-sm" :title="isDark ? 'Light mode' : 'Dark mode'" aria-label="Toggle theme" @click="toggleTheme">
-          <Sun v-if="isDark" /><Moon v-else />
-        </button>
-        <button class="btn btn-ghost btn-icon btn-sm hover:!text-destructive" title="Sign out" aria-label="Sign out" @click="signOutOpen = true"><LogOut /></button>
-      </div>
+    <!-- user panel -->
+    <div class="flex h-[3.25rem] shrink-0 items-center gap-2 bg-rail/60 px-2" style="--dot-ring: color-mix(in srgb, var(--rail) 60%, var(--sidebar))">
+      <button class="flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 text-left transition-colors hover:bg-hover" title="Copy your ID" @click="copyText(myId, 'ID copied')">
+        <UserAvatar :name="chat.state.account?.username ?? '?'" :id="chat.state.account?.id" :size="32" :online="chat.state.status === 'online'" />
+        <span class="min-w-0 flex-1 leading-tight">
+          <span class="block truncate text-[13px] font-semibold">{{ chat.state.account?.username }}</span>
+          <span class="block truncate font-mono text-[11px] text-muted-foreground">{{ myId }}</span>
+        </span>
+        <Copy class="size-3.5 shrink-0 text-muted-foreground" />
+      </button>
+      <button class="btn btn-ghost btn-icon btn-sm md:hidden" title="Account settings" aria-label="Account settings" @click="accountOpen = true"><Settings /></button>
     </div>
 
-    <AccountDialog v-model:open="accountOpen" @change-password="pwOpen = true" />
-    <ChangePasswordDialog v-model:open="pwOpen" />
-    <FriendsDialog v-model:open="friendsOpen" />
-    <ConfirmDialog
-      v-model:open="signOutOpen"
-      title="Sign out?"
-      description="This removes this device's local copy of your data. Your messages are stored encrypted on the server and come back when you sign in again."
-      confirm-label="Sign out"
-      :loading="signingOut"
-      @confirm="signOut"
-    />
     <NewGroupDialog v-model:open="groupOpen" @created="emit('selected')" />
   </aside>
 </template>

@@ -57,3 +57,8 @@ export function relTime(ts: number): string {
   if (days < 7) return d.toLocaleDateString([], { weekday: 'short' })
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
+
+/** "12:49pm" */
+export function formatClock(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).replace(/\s/g, '').toLowerCase()
+}

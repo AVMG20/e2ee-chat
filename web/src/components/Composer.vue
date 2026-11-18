@@ -68,7 +68,7 @@ const SendOnEnter = Extension.create({
 })
 
 const editor = useEditor({
-  extensions: [...editorExtensions(), Placeholder.configure({ placeholder: 'Message …' }), SendOnEnter],
+  extensions: [...editorExtensions(), Placeholder.configure({ placeholder: 'Message' }), SendOnEnter],
   editable: !props.disabled,
   onUpdate: ({ editor: ed }) => {
     empty.value = isEmptyDoc(ed.getJSON())
@@ -137,8 +137,8 @@ const tools: Tool[] = [
 </script>
 
 <template>
-  <div class="mx-auto max-w-3xl">
-    <div class="glass composer-shell overflow-hidden rounded-[1.6rem]" :class="disabled && 'opacity-60'">
+  <div>
+    <div class="composer-shell overflow-hidden rounded-lg" :class="disabled && 'opacity-60'">
       <div v-if="toolsOpen" class="flex flex-wrap items-center gap-0.5 border-b border-line px-2.5 py-1.5">
         <button
           v-for="t in tools" :key="t.title" type="button" class="btn btn-ghost btn-icon btn-sm" :title="t.title" :aria-label="t.title"
@@ -155,13 +155,13 @@ const tools: Tool[] = [
       </div>
 
       <form v-if="linkOpen" class="flex items-center gap-1.5 border-b border-line px-2.5 py-2" @submit.prevent="applyLink">
-        <input v-model="linkUrl" class="field !h-9 !rounded-xl !text-sm" placeholder="https://… (empty removes link)" autofocus>
+        <input v-model="linkUrl" class="field !h-9 !rounded-md !text-sm" placeholder="https://… (empty removes link)" autofocus>
         <button class="btn btn-primary btn-icon btn-sm" type="submit" title="Apply" aria-label="Apply"><Check /></button>
         <button class="btn btn-ghost btn-icon btn-sm" type="button" title="Cancel" aria-label="Cancel" @click="linkOpen = false"><X /></button>
       </form>
 
-      <div class="flex items-end gap-1 p-1.5">
-        <button type="button" class="btn btn-ghost btn-icon btn-lg shrink-0" title="Attach file" aria-label="Attach file" :disabled="disabled" @click="fileInput?.click()">
+      <div class="flex items-end gap-0.5 px-1">
+        <button type="button" class="btn btn-ghost btn-icon shrink-0 !size-10" title="Attach file" aria-label="Attach file" :disabled="disabled" @click="fileInput?.click()">
           <Paperclip />
         </button>
         <input ref="fileInput" type="file" multiple class="hidden" @change="onPick">
@@ -169,14 +169,14 @@ const tools: Tool[] = [
         <EditorContent :editor="editor" class="max-h-40 min-w-0 flex-1 overflow-y-auto py-2.5 text-[15px]" />
 
         <button
-          type="button" class="btn btn-ghost btn-icon btn-lg shrink-0 text-[0.95rem] font-semibold"
+          type="button" class="btn btn-ghost btn-icon shrink-0 !size-10 text-sm font-semibold"
           title="Formatting" aria-label="Toggle formatting toolbar" :disabled="disabled"
           :class="toolsOpen && 'btn-active'" @click="toolsOpen = !toolsOpen"
         >
           Aa
         </button>
         <button
-          type="button" class="btn btn-primary btn-icon btn-lg shrink-0 transition-all" title="Send (Enter)" aria-label="Send"
+          type="button" class="btn btn-primary btn-icon shrink-0 !size-10 transition-all" title="Send (Enter)" aria-label="Send"
           :class="empty && 'scale-90 !opacity-35'" :disabled="disabled || sending || empty" @click="send"
         >
           <ArrowUp stroke-width="2.5" />

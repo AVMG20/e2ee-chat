@@ -3,6 +3,7 @@ import { toast } from 'vue-sonner'
 
 /** Shared open-state for the Friends dialog (opened from the sidebar and the empty state). */
 export const friendsOpen = ref(false)
+export const accountOpen = ref(false)
 
 export async function copyText(text: string, what = 'Copied'): Promise<void> {
   try {

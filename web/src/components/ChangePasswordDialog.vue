@@ -53,9 +53,9 @@ async function submit() {
     <DialogContent>
       <form class="grid gap-4" @submit.prevent="submit">
         <DialogHeader>
-          <div class="mb-2 flex size-11 items-center justify-center rounded-2xl text-white [background:var(--grad)]"><KeyRound class="size-5" /></div>
+          <div class="mb-2 flex size-11 items-center justify-center rounded-lg text-white [background:var(--grad)]"><KeyRound class="size-5" /></div>
           <DialogTitle>Change password</DialogTitle>
-          <DialogDescription>Your keys are re-locked with the new password. Other devices stay signed in. Passwords can't be reset.</DialogDescription>
+          <DialogDescription>Your keys are re-locked with the new password. Your other devices will be signed out. Passwords can't be reset.</DialogDescription>
         </DialogHeader>
         <div>
           <label class="label" for="pw-old">Current password</label>
@@ -70,7 +70,7 @@ async function submit() {
           <div class="field-icon"><LockKeyhole /><input id="pw-confirm" v-model="confirm" class="field" type="password" required autocomplete="new-password" :disabled="busy"></div>
           <p v-if="mismatch" class="mt-1.5 text-xs text-destructive">Passwords do not match.</p>
         </div>
-        <p v-if="error" class="rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{{ error }}</p>
+        <p v-if="error" class="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{{ error }}</p>
         <DialogFooter>
           <button type="submit" class="btn btn-primary" :disabled="busy">
             <Loader2 v-if="busy" class="animate-spin" />{{ busy ? 'Re-locking keys…' : 'Change password' }}

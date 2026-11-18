@@ -106,7 +106,9 @@ async fn registration_and_login() {
     let alice = register(&url, "alice", 1).await.unwrap();
     assert_eq!(alice.id.len(), 8);
     assert_eq!(register(&url, "alice", 2).await.err().unwrap(), "That username is taken");
-    for bad in ["__proto__", "al", "a b c", "_alice", "Alice"] {
+    // Usernames are unique ignoring case.
+    assert_eq!(register(&url, "ALICE", 2).await.err().unwrap(), "That username is taken");
+    for bad in ["__proto__", "al", "a b c", "_alice", "Älice"] {
         assert!(register(&url, bad, 3).await.is_err(), "{bad} should be rejected");
     }
 
@@ -118,6 +120,11 @@ async fn registration_and_login() {
     let fake = recv(&mut ws).await["salt"].clone();
     send(&mut ws, json!({"type": "prelogin", "username": "nobody"})).await;
     assert_eq!(recv(&mut ws).await["salt"], fake);
+    let (mut ws, _) = connect_async(&url).await.unwrap();
+    send(&mut ws, json!({"type": "prelogin", "username": "NoBody"})).await;
+    assert_eq!(recv(&mut ws).await["salt"], fake);
+    send(&mut ws, json!({"type": "prelogin", "username": "Alice"})).await;
+    assert_eq!(recv(&mut ws).await["salt"], b64(1, 16));
 
     // Wrong password.
     send(&mut ws, json!({"type": "login", "username": "alice", "authKey": b64(9, 32)})).await;
@@ -125,10 +132,11 @@ async fn registration_and_login() {
 
     // Right password: new session token plus the locked key bundle.
     let (mut ws, _) = connect_async(&url).await.unwrap();
-    send(&mut ws, json!({"type": "login", "username": "alice", "authKey": b64(1, 32)})).await;
+    send(&mut ws, json!({"type": "login", "username": "ALICE", "authKey": b64(1, 32)})).await;
     let w = recv(&mut ws).await;
     assert_eq!((w["type"].as_str(), w["bundle"].as_str()), (Some("welcome"), Some("locked-keys")));
     assert_eq!(w["me"]["id"], alice.id.as_str());
+    assert_eq!(w["me"]["username"], "alice"); // shown as registered
     assert!(w["token"].is_string());
 
     // Resume with the first device's token; a bad token fails.
@@ -253,9 +261,46 @@ async fn password_change() {
 
     let (mut ws, _) = connect_async(&url).await.unwrap();
     send(&mut ws, json!({"type": "login", "username": "alice", "authKey": b64(4, 32)})).await;
-    assert_eq!(recv(&mut ws).await["bundle"], "relocked");
-    // The existing session keeps working.
+    let w = recv(&mut ws).await;
+    assert_eq!(w["bundle"], "relocked");
+    // The device that changed the password stays signed in...
     resume(&url, &a.token, 0).await;
+    // ...but a new password signs out every other device.
+    let other = w["token"].as_str().unwrap().to_string();
+    send(&mut a.ws, json!({"type": "password", "req": 4, "authKey": b64(4, 32), "newSalt": b64(5, 16),
+                           "newAuthKey": b64(5, 32), "bundle": "relocked2"}))
+    .await;
+    assert_eq!(recv_type(&mut a.ws, "ok").await["req"], 4);
+    assert_eq!(recv_type(&mut ws, "error").await["message"], "Your password was changed. Sign in again.");
+    let (mut ws3, _) = connect_async(&url).await.unwrap();
+    send(&mut ws3, json!({"type": "resume", "token": other})).await;
+    assert_eq!(recv(&mut ws3).await["message"], "Session expired. Sign in again.");
+    resume(&url, &a.token, 0).await;
+}
+
+#[tokio::test]
+async fn logout_ends_resumed_session() {
+    let (url, _dir) = start().await;
+    let a = register(&url, "alice", 1).await.unwrap();
+    drop(a.ws);
+    // A reload resumes the session; signing out from there must revoke the token.
+    let mut ws = resume(&url, &a.token, 0).await;
+    send(&mut ws, json!({"type": "logout"})).await;
+    while let Some(Ok(_)) = ws.next().await {}
+    let (mut ws, _) = connect_async(&url).await.unwrap();
+    send(&mut ws, json!({"type": "resume", "token": a.token})).await;
+    assert_eq!(recv(&mut ws).await["message"], "Session expired. Sign in again.");
+}
+
+#[tokio::test]
+async fn lookup_hides_presence_of_non_friends() {
+    let (url, _dir) = start().await;
+    let mut a = register(&url, "alice", 1).await.unwrap();
+    let b = register(&url, "bob", 2).await.unwrap();
+    send(&mut a.ws, json!({"type": "lookup", "req": 1, "ids": [b.id]})).await;
+    let users = recv_type(&mut a.ws, "users").await;
+    assert_eq!(users["users"][0]["name"], "bob");
+    assert_eq!(users["users"][0]["online"], false);
 }
 
 #[tokio::test]

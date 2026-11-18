@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Copy, KeyRound } from 'lucide-vue-next'
+import { Copy, KeyRound, LogOut } from 'lucide-vue-next'
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
@@ -11,7 +11,7 @@ import { errMsg } from '@/lib/format'
 import { copyText } from '@/lib/ui'
 
 const open = defineModel<boolean>('open', { required: true })
-defineEmits<{ changePassword: [] }>()
+defineEmits<{ changePassword: []; signOut: [] }>()
 
 const id = computed(() => chat.formatId(chat.state.account?.id ?? ''))
 
@@ -32,7 +32,7 @@ function fingerprint(): string {
         <DialogDescription>{{ chat.state.account?.server }}</DialogDescription>
       </DialogHeader>
 
-      <div class="well flex items-center gap-3 rounded-2xl p-3.5" style="--dot-ring: var(--card)">
+      <div class="well flex items-center gap-3 rounded-lg p-3.5" style="--dot-ring: var(--card)">
         <UserAvatar :name="chat.state.account?.username ?? '?'" :id="chat.state.account?.id" :size="48" />
         <div class="min-w-0 flex-1">
           <div class="truncate text-base font-semibold">{{ chat.state.account?.username }}</div>
@@ -44,7 +44,10 @@ function fingerprint(): string {
       <FingerprintBlock label="Key fingerprint" :value="fingerprint()" />
       <p class="-mt-3 text-xs text-muted-foreground">Share this with your contacts over a trusted channel so they can verify it is really you.</p>
 
-      <button class="btn btn-soft w-full" @click="open = false; $emit('changePassword')"><KeyRound />Change password</button>
+      <div class="grid gap-2 sm:grid-cols-2">
+        <button class="btn btn-soft" @click="open = false; $emit('changePassword')"><KeyRound />Change password</button>
+        <button class="btn btn-danger" @click="open = false; $emit('signOut')"><LogOut />Sign out</button>
+      </div>
     </DialogContent>
   </Dialog>
 </template>

@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { useElementSize } from '@vueuse/core'
 import {
-  ArrowLeft, Copy, Loader2, Lock, LogOut, MessageCircle, ShieldAlert, ShieldCheck, Sparkles, Upload, UserMinus, UserPlus, Users,
+  ArrowLeft, Copy, Hash, Loader2, LogOut, MessageCircle, ShieldAlert, ShieldCheck, Upload, UserMinus, UserPlus, Users,
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import {
@@ -39,15 +38,7 @@ const addOpen = ref(false)
 const leaveOpen = ref(false)
 const busy = ref(false)
 
-const topEl = ref<HTMLElement | null>(null)
-const bottomEl = ref<HTMLElement | null>(null)
-const { height: topH } = useElementSize(topEl, undefined, { box: 'border-box' })
-const { height: bottomH } = useElementSize(bottomEl, undefined, { box: 'border-box' })
 const composer = ref<InstanceType<typeof Composer> | null>(null)
-
-const onlineCount = computed(() =>
-  group.value ? group.value.members.filter((m) => chat.state.contacts[m]?.online).length : 0,
-)
 
 // Drag-and-drop overlay
 const dragDepth = ref(0)
@@ -121,35 +112,24 @@ async function leave() {
 
 <template>
   <main
-    class="app-bg relative flex-col overflow-hidden"
+    class="relative min-w-0 flex-col overflow-hidden bg-background"
     @dragenter.prevent="onDragEnter" @dragover.prevent @dragleave="onDragLeave" @drop.prevent="onDrop"
   >
     <!-- Empty state -->
-    <div v-if="!conv" class="relative flex flex-1 flex-col items-center justify-center gap-8 p-8 text-center">
-      <button class="btn btn-soft btn-sm absolute top-4 left-4 md:hidden" @click="$emit('back')"><ArrowLeft />Chats</button>
-      <div class="relative h-40 w-56">
-        <div class="glass float-y absolute top-2 left-0 flex size-14 items-center justify-center rounded-2xl text-muted-foreground" style="animation-delay: -2s"><Lock class="size-6" /></div>
-        <div class="glass float-y absolute right-0 bottom-0 flex size-14 items-center justify-center rounded-2xl text-success" style="animation-delay: -4s"><ShieldCheck class="size-6" /></div>
-        <div class="float-y absolute top-1/2 left-1/2 flex size-28 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-[2rem] text-white shadow-[var(--shadow-lg)] [background:var(--grad)]">
-          <MessageCircle class="size-12" stroke-width="1.75" />
-          <Sparkles class="absolute -top-2 -right-2 size-6 text-[oklch(0.85_0.12_85)]" />
-        </div>
-      </div>
-      <div v-if="hasFriends" class="max-w-sm space-y-2">
-        <h2 class="text-2xl font-semibold tracking-tight">Your messages, only yours</h2>
-        <p class="text-[15px] leading-relaxed text-muted-foreground">
-          Pick a conversation to start chatting. Everything is encrypted on this device before it leaves.
-        </p>
+    <div v-if="!conv" class="relative flex flex-1 flex-col items-center justify-center gap-6 p-8 text-center">
+      <button class="btn btn-soft btn-sm absolute top-3 left-3 md:hidden" @click="$emit('back')"><ArrowLeft />Chats</button>
+      <div class="flex size-20 items-center justify-center rounded-full bg-card text-primary"><MessageCircle class="size-9" stroke-width="1.75" /></div>
+      <div v-if="hasFriends" class="max-w-sm space-y-1.5">
+        <h2 class="text-xl font-bold">Your messages, only yours</h2>
+        <p class="text-sm leading-relaxed text-muted-foreground">Pick a conversation to start chatting. Everything is encrypted on this device before it leaves.</p>
       </div>
       <div v-else class="flex max-w-sm flex-col items-center gap-4">
-        <div class="space-y-2">
-          <h2 class="text-2xl font-semibold tracking-tight">Find your people</h2>
-          <p class="text-[15px] leading-relaxed text-muted-foreground">
-            Share your ID with a friend, or add theirs, to start an encrypted chat.
-          </p>
+        <div class="space-y-1.5">
+          <h2 class="text-xl font-bold">Find your people</h2>
+          <p class="text-sm leading-relaxed text-muted-foreground">Share your ID with a friend, or add theirs, to start an encrypted chat.</p>
         </div>
-        <button class="well flex items-center gap-3 rounded-2xl px-4 py-3 transition-colors hover:bg-hover" title="Copy your ID" @click="copyText(myId, 'ID copied')">
-          <span class="font-mono text-2xl font-semibold tracking-[0.12em]">{{ myId }}</span>
+        <button class="well flex items-center gap-3 rounded-md px-4 py-2.5 transition-colors hover:bg-hover" title="Copy your ID" @click="copyText(myId, 'ID copied')">
+          <span class="font-mono text-xl font-semibold tracking-[0.12em]">{{ myId }}</span>
           <Copy class="size-4 text-muted-foreground" />
         </button>
         <button class="btn btn-primary" @click="friendsOpen = true"><UserPlus />Add a friend</button>
@@ -157,75 +137,69 @@ async function leave() {
     </div>
 
     <template v-else>
-      <MessageList :top-pad="topH" :bottom-pad="bottomH" />
+      <header class="flex h-12 shrink-0 items-center gap-2.5 border-b border-line px-3 shadow-sm">
+        <button class="btn btn-ghost btn-icon btn-sm md:hidden" title="Back" aria-label="Back" @click="$emit('back')"><ArrowLeft /></button>
+        <Hash v-if="group" class="size-5 shrink-0 text-muted-foreground" />
+        <UserAvatar v-else :name="conv.title" :id="convKey" :size="28" :online="contact?.online" style="--dot-ring: var(--background)" />
+        <div class="flex min-w-0 flex-1 items-baseline gap-2.5">
+          <h1 class="truncate text-[15px] font-bold">{{ conv.title }}</h1>
+          <ShieldCheck v-if="contact?.verified" class="size-4 shrink-0 self-center text-success" title="Verified" />
+          <span v-if="contact" class="hidden truncate text-xs text-muted-foreground sm:inline">{{ contact.online ? 'Online' : 'Offline' }}</span>
+          <span v-else-if="group" class="truncate text-xs text-muted-foreground">
+            <button class="hover:underline" @click="membersOpen = true">{{ group.members.length }} members</button>
+            <span class="mx-1">·</span>
+            <button class="font-medium text-[var(--link)] hover:underline" @click="addOpen = true">+ Add member</button>
+          </span>
+        </div>
 
-      <div ref="topEl" class="pointer-events-none absolute inset-x-0 top-0 z-10 space-y-2 p-2 sm:p-3">
-        <header class="glass pointer-events-auto flex items-center gap-3 rounded-2xl px-3 py-2.5">
-          <button class="btn btn-ghost btn-icon md:hidden" title="Back" aria-label="Back" @click="$emit('back')"><ArrowLeft /></button>
-          <UserAvatar :name="conv.title" :id="convKey" :size="40" :online="contact?.online" style="--dot-ring: var(--card)" />
-          <div class="min-w-0 flex-1 leading-tight">
-            <div class="flex items-center gap-1.5">
-              <h1 class="truncate text-[15.5px] font-semibold">{{ conv.title }}</h1>
-              <ShieldCheck v-if="contact?.verified" class="size-4 shrink-0 text-success" title="Verified" />
-            </div>
-            <div v-if="contact" class="mt-0.5 truncate text-xs" :class="contact.online ? 'text-success' : 'text-muted-foreground'">
-              {{ contact.online ? 'Online' : 'Offline' }}<template v-if="contact.verified"> · Verified</template>
-            </div>
-            <div v-else-if="group" class="mt-0.5 truncate text-xs text-muted-foreground">
-              {{ group.members.length }} members<template v-if="onlineCount"> · {{ onlineCount }} online</template>
-            </div>
-          </div>
+        <template v-if="contact">
+          <button class="btn btn-ghost btn-sm" title="Verify security key" @click="verifyOpen = true">
+            <ShieldCheck :class="contact.verified && 'text-success'" /><span class="hidden sm:inline">{{ contact.verified ? 'Verified' : 'Verify' }}</span>
+          </button>
+          <button class="btn btn-ghost btn-icon btn-sm hover:!text-destructive" title="Remove friend" aria-label="Remove friend" @click="removeOpen = true"><UserMinus /></button>
+        </template>
+        <template v-else-if="group">
+          <button class="btn btn-ghost btn-icon btn-sm" title="Members" aria-label="Members" @click="membersOpen = true"><Users /></button>
+          <button class="btn btn-ghost btn-icon btn-sm hover:!text-destructive" title="Leave group" aria-label="Leave group" @click="leaveOpen = true"><LogOut /></button>
+        </template>
+      </header>
 
-          <template v-if="contact">
-            <button class="btn btn-ghost btn-icon hover:!text-destructive" title="Remove friend" aria-label="Remove friend" @click="removeOpen = true"><UserMinus /></button>
-            <button class="btn btn-soft btn-sm" title="Verify security key" @click="verifyOpen = true">
-              <ShieldCheck :class="contact.verified && 'text-success'" /><span class="hidden sm:inline">{{ contact.verified ? 'Verified' : 'Verify' }}</span>
-            </button>
-          </template>
-          <template v-else-if="group">
-            <button class="btn btn-ghost btn-icon" title="Members" aria-label="Members" @click="membersOpen = true"><Users /></button>
-            <button class="btn btn-ghost btn-icon" title="Add members" aria-label="Add members" @click="addOpen = true"><UserPlus /></button>
-            <button class="btn btn-ghost btn-icon hover:!text-destructive" title="Leave group" aria-label="Leave group" @click="leaveOpen = true"><LogOut /></button>
-          </template>
-        </header>
-
-        <div
-          v-if="contact?.keyChanged"
-          class="pointer-events-auto max-h-[60dvh] space-y-3 overflow-y-auto rounded-2xl bg-[color-mix(in_oklab,var(--destructive)_14%,var(--glass-solid))] p-4 shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--destructive)_40%,transparent),var(--shadow-md)] backdrop-blur-xl"
-          role="alert"
-        >
-          <div class="flex items-start gap-3 text-sm">
-            <ShieldAlert class="mt-0.5 size-5 shrink-0 text-destructive" />
-            <p class="min-w-0 flex-1 leading-relaxed">
-              <strong class="font-semibold text-destructive">{{ contact.name }}'s security key changed.</strong>
-              This could mean they reinstalled, or someone is impersonating them.
-              Compare this with {{ contact.name }} in person or on a call before trusting it.
-            </p>
-          </div>
-          <div class="grid gap-3 sm:grid-cols-2">
-            <div class="opacity-70"><FingerprintBlock label="Previous key" :value="contact.fingerprint" compact /></div>
-            <FingerprintBlock v-if="contact.pendingFingerprint" label="New key" :value="contact.pendingFingerprint" tone="danger" compact />
-            <p v-else class="self-center text-xs text-muted-foreground">Waiting for the new key…</p>
-          </div>
-          <div class="flex justify-end">
-            <button class="btn btn-danger btn-sm" :disabled="busy || !contact.pendingFingerprint" @click="trust">
-              <Loader2 v-if="busy" class="animate-spin" />Trust new key
-            </button>
-          </div>
+      <div
+        v-if="contact?.keyChanged"
+        class="max-h-[50dvh] shrink-0 space-y-3 overflow-y-auto border-b border-destructive/40 bg-destructive/10 p-3 sm:px-4"
+        role="alert"
+      >
+        <div class="flex items-start gap-3 text-sm">
+          <ShieldAlert class="mt-0.5 size-5 shrink-0 text-destructive" />
+          <p class="min-w-0 flex-1 leading-relaxed">
+            <strong class="font-semibold text-destructive">{{ contact.name }}'s security key changed.</strong>
+            This could mean they reinstalled, or someone is impersonating them.
+            Compare this with {{ contact.name }} in person or on a call before trusting it.
+          </p>
+        </div>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div class="opacity-70"><FingerprintBlock label="Previous key" :value="contact.fingerprint" compact /></div>
+          <FingerprintBlock v-if="contact.pendingFingerprint" label="New key" :value="contact.pendingFingerprint" tone="danger" compact />
+          <p v-else class="self-center text-xs text-muted-foreground">Waiting for the new key…</p>
+        </div>
+        <div class="flex justify-end">
+          <button class="btn btn-danger btn-sm" :disabled="busy || !contact.pendingFingerprint" @click="trust">
+            <Loader2 v-if="busy" class="animate-spin" />Trust new key
+          </button>
         </div>
       </div>
 
-      <div ref="bottomEl" class="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-background via-background/70 to-transparent px-2 pt-10 pb-2 sm:px-4 sm:pb-4">
-        <div class="pointer-events-auto"><Composer ref="composer" :disabled="!!contact?.keyChanged" /></div>
-      </div>
+      <MessageList />
+
+      <div class="shrink-0 px-3 pb-3 sm:px-4 sm:pb-4"><Composer ref="composer" :disabled="!!contact?.keyChanged" /></div>
 
       <Transition
         enter-active-class="transition-opacity duration-150" enter-from-class="opacity-0"
         leave-active-class="transition-opacity duration-150" leave-to-class="opacity-0"
       >
-        <div v-if="dragDepth > 0" class="pointer-events-none absolute inset-3 z-30 flex flex-col items-center justify-center gap-3 rounded-[2rem] border-2 border-dashed border-primary bg-background/80 text-primary backdrop-blur-md">
-          <div class="flex size-16 items-center justify-center rounded-2xl text-white [background:var(--grad)]"><Upload class="size-7" /></div>
-          <p class="text-lg font-semibold tracking-tight">Drop files to send</p>
+        <div v-if="dragDepth > 0" class="pointer-events-none absolute inset-3 z-30 flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-primary bg-background/85 text-primary">
+          <Upload class="size-9" />
+          <p class="text-lg font-bold">Drop files to send</p>
         </div>
       </Transition>
 
@@ -247,8 +221,8 @@ async function leave() {
               <DialogTitle>{{ group.name }}</DialogTitle>
               <DialogDescription>{{ group.members.length }} members</DialogDescription>
             </DialogHeader>
-            <ul class="well max-h-72 space-y-0.5 overflow-y-auto rounded-2xl p-1.5 text-sm">
-              <li v-for="m in group.members" :key="m" class="flex items-center gap-3 rounded-xl px-2 py-1.5" style="--dot-ring: var(--card)">
+            <ul class="well max-h-72 space-y-0.5 overflow-y-auto rounded-md p-1.5 text-sm">
+              <li v-for="m in group.members" :key="m" class="flex items-center gap-3 rounded-md px-2 py-1.5" style="--dot-ring: var(--card)">
                 <UserAvatar :name="nameOf(m)" :id="m" :size="32" :online="m === chat.state.account?.id ? true : chat.state.contacts[m]?.friend ? !!chat.state.contacts[m]?.online : undefined" />
                 <span class="flex-1 font-medium">{{ nameOf(m) }}</span>
                 <span v-if="m === chat.state.account?.id" class="text-xs text-muted-foreground">you</span>

@@ -5,12 +5,10 @@ import { Toaster } from '@/components/ui/sonner'
 import LoginScreen from '@/components/LoginScreen.vue'
 import ChatLayout from '@/components/ChatLayout.vue'
 import { chat } from '@/lib/chat'
-import { initTheme } from '@/lib/theme'
 
 const booting = ref(true)
 
 onMounted(async () => {
-  initTheme()
   try {
     await chat.restore()
   } catch {

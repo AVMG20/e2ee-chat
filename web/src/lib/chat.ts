@@ -29,7 +29,7 @@ export const chat = {
   login: engine.login,
   /** Signs out and deletes all local data on this device (everything is restored on next sign-in). */
   logout: engine.logout,
-  /** Changes the password (re-locks the keys). Other devices stay signed in. */
+  /** Changes the password (re-locks the keys). Signs out all other devices. */
   changePassword: engine.changePassword,
 
   /** "7K3QX9PA" → "7K3Q-X9PA" for display. */

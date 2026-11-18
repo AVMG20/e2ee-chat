@@ -59,12 +59,12 @@ async function act(key: string, fn: () => Promise<void>) {
   <Dialog v-model:open="open">
     <DialogContent class="sm:max-w-lg">
       <DialogHeader>
-        <div class="mb-2 flex size-11 items-center justify-center rounded-2xl text-white [background:var(--grad)]"><UserPlus class="size-5" /></div>
+        <div class="mb-2 flex size-11 items-center justify-center rounded-lg text-white [background:var(--grad)]"><UserPlus class="size-5" /></div>
         <DialogTitle>Friends</DialogTitle>
         <DialogDescription>Share your ID so friends can find you, or add a friend by their ID.</DialogDescription>
       </DialogHeader>
 
-      <div class="well flex items-center gap-3 rounded-2xl p-3.5">
+      <div class="well flex items-center gap-3 rounded-lg p-3.5">
         <div class="min-w-0 flex-1">
           <div class="eyebrow mb-1">Your ID</div>
           <div class="font-mono text-2xl font-semibold tracking-[0.12em] select-all">{{ myId }}</div>
@@ -80,13 +80,13 @@ async function act(key: string, fn: () => Promise<void>) {
             <Loader2 v-if="adding" class="animate-spin" /><template v-else>Add</template>
           </button>
         </div>
-        <p v-if="error" class="mt-2 rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{{ error }}</p>
+        <p v-if="error" class="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{{ error }}</p>
       </form>
 
       <section v-if="incoming.length">
         <div class="eyebrow mb-2">Requests <span class="text-primary">· {{ incoming.length }}</span></div>
-        <ul class="well max-h-48 space-y-0.5 overflow-y-auto rounded-2xl p-1.5">
-          <li v-for="r in incoming" :key="r.id" class="flex items-center gap-3 rounded-xl px-2 py-1.5" style="--dot-ring: var(--card)">
+        <ul class="well max-h-48 space-y-0.5 overflow-y-auto rounded-lg p-1.5">
+          <li v-for="r in incoming" :key="r.id" class="flex items-center gap-3 rounded-md px-2 py-1.5" style="--dot-ring: var(--card)">
             <UserAvatar :name="r.name" :id="r.id" :size="36" />
             <div class="min-w-0 flex-1 leading-tight">
               <div class="truncate text-sm font-semibold">{{ r.name }}</div>
@@ -102,8 +102,8 @@ async function act(key: string, fn: () => Promise<void>) {
 
       <section v-if="outgoing.length">
         <div class="eyebrow mb-2">Sent requests</div>
-        <ul class="well max-h-40 space-y-0.5 overflow-y-auto rounded-2xl p-1.5">
-          <li v-for="r in outgoing" :key="r.id" class="flex items-center gap-3 rounded-xl px-2 py-1.5" style="--dot-ring: var(--card)">
+        <ul class="well max-h-40 space-y-0.5 overflow-y-auto rounded-lg p-1.5">
+          <li v-for="r in outgoing" :key="r.id" class="flex items-center gap-3 rounded-md px-2 py-1.5" style="--dot-ring: var(--card)">
             <UserAvatar :name="r.name" :id="r.id" :size="32" />
             <div class="min-w-0 flex-1 leading-tight">
               <div class="truncate text-sm font-medium">{{ r.name }}</div>

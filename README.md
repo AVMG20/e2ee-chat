@@ -7,7 +7,8 @@ The server can never read your messages, files or group names. It only stores an
 encrypted blobs.
 
 - Open sign-up with a username and password. One account works in the browser and the desktop app, on as many devices as you like
-- Add friends by their user ID (like `7K3Q-X9PA`), Discord style
+- Add friends by their user ID (like `7K3Q-X9PA`), Discord style. Only friends can DM you or add you to a new group
+- Usernames keep their capitals (`AVMG`) but are unique and signed in to regardless of case
 - Direct messages and group chats (as many groups as you like)
 - Rich text (bold, italic, code, lists, quotes, links) with a Tiptap editor
 - Encrypted file and image sharing (up to 10 MB)
@@ -50,7 +51,8 @@ Sending a message (DM or group):
 
 Groups exist only inside encrypted messages. The server never learns a group's name or id.
 
-**What the server *can* see:** usernames, user IDs, who is friends with whom, public keys, and for every message: who sent it, who it
+**What the server *can* see:** usernames, user IDs, who is friends with whom, public keys, your IP
+address and when you're online, and for every message: who sent it, who it
 goes to, when, and how big it is. A group message is sent to all members at once, so the server
 can see who tends to talk together (a likely member list), just not what the group is called or
 what is said.
@@ -60,16 +62,23 @@ what is said.
 The first time you see someone's key, the app trusts it ("trust on first use"). To rule out
 a malicious server swapping keys at that moment, open a DM, click **Verify**, and compare
 the fingerprint with your friend in person or on a call. If someone's key ever changes, the
-app blocks the conversation until you accept the new key.
+app holds that person's new messages until you accept the new key. Keys you've already pinned
+or verified on one device can't be swapped by the server on your other devices.
 
 ### Known limitations
 
 This is a hobby-scale app, not Signal. In particular:
 
-- No forward secrecy: if someone steals a device's keys, they can decrypt that device's past messages that they captured.
+- No forward secrecy. Your keys are the same on all your devices, and the server keeps encrypted
+  messages for 180 days, so whoever gets your keys (or password plus the server's database) can
+  read that history.
+- Changing your password signs out your other devices and re-locks your keys, but it doesn't
+  replace them. If you think your keys leaked, make a new account.
 - **Your password protects your keys.** Whoever has the server's database can try to guess it
   offline (Argon2id makes each guess slow, but a weak password will still fall). Use a long one.
   There is no password reset: if you forget it, your account is gone.
+- The server can't forge messages or settings, but it can withhold or delay them, serve an older
+  copy of your synced settings, or give a new device a wrong password salt (sign-in then just fails).
 - On a signed-in device, keys and history sit unencrypted in the browser/app storage (IndexedDB).
   Signing out deletes them from that device.
 - The **web version** trusts the JavaScript served by your server. If you don't trust the server
@@ -82,7 +91,7 @@ This is a hobby-scale app, not Signal. In particular:
 
 ```bash
 docker build -t e2ee-chat .
-docker run -d --name e2ee-chat -p 8080:8080 -v e2ee-chat-data:/data e2ee-chat
+docker run -d --name e2ee-chat -p 127.0.0.1:8080:8080 -v e2ee-chat-data:/data e2ee-chat
 ```
 
 Open `http://your-server:8080`, create an account, and send your user ID to your friends.
@@ -103,10 +112,11 @@ WEB_DIR=web/dist ./target/release/e2ee-chat-server
 | `DATA_DIR` | `./data` | where `chat.db` lives |
 | `WEB_DIR` | none | built web app (`web/dist`) to serve |
 | `RETENTION_DAYS` | `180` | encrypted messages older than this are deleted from the server |
-| `TRUST_PROXY` | `false` | set to `true` behind a reverse proxy, so rate limits use the client's IP from `X-Forwarded-For` |
+| `TRUST_PROXY` | `false` | set to `true` behind a reverse proxy, so rate limits use the client's IP from `X-Forwarded-For` (only honoured when the connection comes from a private or loopback address) |
 
 Each user can store up to 512 MB of (encrypted) messages and files on the server. Sign-in and
-sign-up are rate-limited per IP.
+sign-up are rate-limited per IP (per /64 for IPv6). An account can be signed in on up to 10
+devices at once.
 
 The server sends a strict Content-Security-Policy with the web app. If you put it behind a reverse
 proxy, don't let the proxy strip or replace that header.

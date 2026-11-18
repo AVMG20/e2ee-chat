@@ -13,7 +13,7 @@ defineEmits<{ confirm: [] }>()
   <Dialog v-model:open="open">
     <DialogContent>
       <DialogHeader>
-        <div class="mb-2 flex size-11 items-center justify-center rounded-2xl bg-destructive/15 text-destructive">
+        <div class="mb-2 flex size-11 items-center justify-center rounded-full bg-destructive/15 text-destructive">
           <TriangleAlert class="size-5" />
         </div>
         <DialogTitle>{{ title }}</DialogTitle>

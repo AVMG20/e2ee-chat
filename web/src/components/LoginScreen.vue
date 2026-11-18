@@ -21,7 +21,7 @@ try {
   /* prefill is best-effort */
 }
 
-const USERNAME_RE = /^[a-z0-9_.]{3,24}$/
+const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.]{2,23}$/
 const serverUrl = computed(() => (chat.isDesktop ? server.value.trim() : chat.defaultServer()))
 const mismatch = computed(() => tab.value === 'create' && confirm.value !== '' && confirm.value !== password.value)
 const tooShort = computed(() => tab.value === 'create' && password.value !== '' && password.value.length < MIN_PASSWORD)
@@ -33,9 +33,9 @@ function switchTab(t: 'signin' | 'create') {
 
 async function submit() {
   error.value = ''
-  const name = username.value.trim().toLowerCase()
+  const name = username.value.trim()
   if (!USERNAME_RE.test(name)) {
-    error.value = 'Username must be 3-24 characters: a-z, 0-9, _ or .'
+    error.value = 'Username must be 3-24 characters: letters, digits, _ or .'
     return
   }
   if (tab.value === 'create') {
@@ -74,23 +74,22 @@ async function submit() {
       <div class="fade-up w-full max-w-[27rem] py-8">
         <div class="mb-7 flex flex-col items-center text-center">
           <div class="relative mb-5">
-            <div class="absolute inset-0 scale-110 rounded-[1.6rem] opacity-70 blur-xl [background:var(--grad)]" />
-            <img src="/favicon.svg" alt="" class="relative size-[4.5rem] rounded-[1.4rem] shadow-[var(--shadow-lg)] ring-1 ring-white/15">
+                        <img src="/favicon.svg" alt="" class="relative size-16 rounded-2xl">
           </div>
-          <h1 class="text-[1.75rem] leading-none font-semibold tracking-tight">E2EE Chat</h1>
+          <h1 class="text-2xl leading-none font-bold">E2EE Chat</h1>
           <p class="mt-2.5 max-w-xs text-[15px] leading-snug text-muted-foreground">Private chat for your own server. End-to-end encrypted.</p>
         </div>
 
-        <div class="dialog rounded-[2rem] p-5 sm:p-6">
-          <div class="relative mb-5 grid grid-cols-2 rounded-2xl bg-inset p-1 shadow-[inset_0_0_0_1px_var(--line)]" role="tablist">
+        <div class="dialog rounded-lg p-5 sm:p-6">
+          <div class="relative mb-5 grid grid-cols-2 rounded-md bg-inset p-1 shadow-[inset_0_0_0_1px_var(--line)]" role="tablist">
             <span
-              class="absolute inset-y-1 left-1 w-[calc(50%-0.25rem)] rounded-xl bg-card shadow-[var(--shadow-sm),inset_0_0_0_1px_var(--line)] transition-transform duration-300 ease-out"
+              class="absolute inset-y-1 left-1 w-[calc(50%-0.25rem)] rounded bg-card shadow-[var(--shadow-sm)] transition-transform duration-300 ease-out"
               :class="tab === 'create' && 'translate-x-full'"
             />
             <button
               v-for="t in ([['signin', 'Sign in'], ['create', 'Create account']] as const)" :key="t[0]"
               role="tab" :aria-selected="tab === t[0]" :disabled="busy"
-              class="relative z-10 rounded-xl px-3 py-2 text-sm font-semibold outline-none transition-colors focus-visible:shadow-[var(--glow)]"
+              class="relative z-10 rounded px-3 py-1.5 text-sm font-semibold outline-none transition-colors focus-visible:shadow-[var(--glow)]"
               :class="tab === t[0] ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'"
               @click="switchTab(t[0])"
             >{{ t[1] }}</button>
@@ -110,10 +109,10 @@ async function submit() {
                 <AtSign />
                 <input
                   id="username" v-model="username" class="field" required minlength="3" maxlength="24" placeholder="yourname"
-                  pattern="[a-z0-9_.]{3,24}" autocomplete="username" autocapitalize="off" spellcheck="false" :disabled="busy"
+                  pattern="[A-Za-z0-9_.]{3,24}" autocomplete="username" autocapitalize="off" spellcheck="false" :disabled="busy"
                 >
               </div>
-              <p v-if="tab === 'create'" class="mt-1.5 text-xs text-muted-foreground">3-24 characters: a-z, 0-9, _ and .</p>
+              <p v-if="tab === 'create'" class="mt-1.5 text-xs text-muted-foreground">3-24 characters: letters, digits, _ and .</p>
             </div>
             <div>
               <label class="label" for="password">Password</label>
@@ -136,14 +135,14 @@ async function submit() {
               <p v-if="mismatch" class="mt-1.5 text-xs text-destructive">Passwords do not match.</p>
             </div>
 
-            <div v-if="tab === 'create'" class="flex items-start gap-2.5 rounded-2xl bg-[color-mix(in_oklab,oklch(0.8_0.15_85)_16%,transparent)] p-3 text-xs leading-relaxed shadow-[inset_0_0_0_1px_color-mix(in_oklab,oklch(0.8_0.15_85)_35%,transparent)]">
+            <div v-if="tab === 'create'" class="flex items-start gap-2.5 rounded-md bg-[color-mix(in_oklab,oklch(0.8_0.15_85)_16%,transparent)] p-3 text-xs leading-relaxed shadow-[inset_0_0_0_1px_color-mix(in_oklab,oklch(0.8_0.15_85)_35%,transparent)]">
               <TriangleAlert class="mt-0.5 size-4 shrink-0 text-[oklch(0.7_0.15_75)]" />
               <span>Your password locks your encryption keys. It can't be reset. If you forget it, the account is lost.</span>
             </div>
 
-            <p v-if="error" class="rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{{ error }}</p>
+            <p v-if="error" class="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{{ error }}</p>
 
-            <button type="submit" class="btn btn-primary !h-12 w-full !rounded-2xl !text-[15px]" :disabled="busy">
+            <button type="submit" class="btn btn-primary !h-11 w-full !text-[15px]" :disabled="busy">
               <Loader2 v-if="busy" class="animate-spin" />
               <template v-if="busy">{{ tab === 'create' ? 'Creating your keys…' : 'Unlocking your keys…' }}</template>
               <template v-else>{{ tab === 'create' ? 'Create account' : 'Sign in' }}</template>

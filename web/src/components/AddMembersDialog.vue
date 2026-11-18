@@ -47,13 +47,13 @@ async function submit() {
     <DialogContent>
       <form class="grid gap-5" @submit.prevent="submit">
         <DialogHeader>
-          <div class="mb-2 flex size-11 items-center justify-center rounded-2xl text-white [background:var(--grad)]"><UserPlus class="size-5" /></div>
+          <div class="mb-2 flex size-11 items-center justify-center rounded-lg text-white [background:var(--grad)]"><UserPlus class="size-5" /></div>
           <DialogTitle>Add members</DialogTitle>
           <DialogDescription>New members will be able to read messages sent after they join.</DialogDescription>
         </DialogHeader>
-        <div class="well max-h-60 space-y-0.5 overflow-y-auto rounded-2xl p-1.5">
+        <div class="well max-h-60 space-y-0.5 overflow-y-auto rounded-lg p-1.5">
           <p v-if="!candidates.length" class="p-2 text-xs text-muted-foreground">All your friends are already in this group.</p>
-          <label v-for="f in candidates" :key="f.id" class="flex cursor-pointer items-center gap-3 rounded-xl px-2 py-1.5 text-sm transition-colors hover:bg-hover">
+          <label v-for="f in candidates" :key="f.id" class="flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-hover">
             <UserAvatar :name="f.name" :id="f.id" :size="28" />
             <span class="flex-1 font-medium">{{ f.name }}</span>
             <Checkbox :model-value="selected.includes(f.id)" @update:model-value="toggle(f.id, $event)" />

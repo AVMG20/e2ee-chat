@@ -39,7 +39,7 @@ async function setVerified(v: boolean | 'indeterminate') {
   <Dialog v-model:open="open">
     <DialogContent class="sm:max-w-lg">
       <DialogHeader>
-        <div class="mb-2 flex size-11 items-center justify-center rounded-2xl text-white [background:var(--grad)]">
+        <div class="mb-2 flex size-11 items-center justify-center rounded-lg text-white [background:var(--grad)]">
           <ShieldCheck class="size-5" />
         </div>
         <DialogTitle>Verify {{ contact.name }}</DialogTitle>
@@ -51,7 +51,7 @@ async function setVerified(v: boolean | 'indeterminate') {
       <div class="space-y-4">
         <FingerprintBlock label="Your fingerprint" :value="mine()" />
         <FingerprintBlock :label="`${contact.name}'s fingerprint`" :value="contact.fingerprint" />
-        <label class="well flex cursor-pointer items-center gap-3 rounded-2xl p-3.5 text-sm">
+        <label class="well flex cursor-pointer items-center gap-3 rounded-lg p-3.5 text-sm">
           <Checkbox :model-value="contact.verified" :disabled="busy" @update:model-value="setVerified" />
           <span>I compared the fingerprints and they match</span>
         </label>

@@ -78,7 +78,9 @@ const validId = (v: unknown): v is string => isStr(v) && ID_RE.test(v)
 const validGroupId = (v: unknown): v is string => isStr(v) && /^[0-9a-f]{32}$/.test(v)
 const isIdList = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 256 && v.every(validId)
 /** Must match the server's rules. */
-const USERNAME_RE = /^[a-z0-9][a-z0-9_.]{2,23}$/
+const USERNAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.]{2,23}$/
+/** Usernames are case-insensitive: the key bundle is bound to the lowercase form. */
+const bundleName = (username: string) => username.toLowerCase()
 
 /** Strip control and bidi-override characters from names other people chose. */
 function cleanLabel(v: string, max: number): string {
@@ -130,7 +132,11 @@ interface Pin {
   signPk: string
   encPk: string
   verified: boolean
-  /** Last change (ms), so the newest wins when devices merge. */
+  /**
+   * Last deliberate change (verify / accept new key), in ms, so the newest wins when
+   * devices merge. 0 for trust-on-first-use pins: those never replace a pin another
+   * device already has, so a server can't push swapped keys to all my devices.
+   */
   at: number
 }
 interface ConvMeta {
@@ -380,6 +386,8 @@ class Session {
   held: Held[] = []
   /** What the server currently says about users we've looked up, by ID. */
   serverUsers: Dict<ServerUser> = dict()
+  /** Keys replaced by trustNewKey this session: held messages may still be signed with them. */
+  retiredPins: Dict<Pin> = dict()
   /** The vault as last seen on the server. */
   remoteVault: VaultData | null = null
 
@@ -570,7 +578,10 @@ async function applyVault(s: Session, sealed: string | null | undefined) {
       updateContactFromPin(s, id)
       pinsChanged = true
     }
-    for (const [id, t] of Object.entries(remote.left)) s.left[id] = Math.max(s.left[id] ?? 0, t)
+    for (const [id, t] of Object.entries(remote.left)) {
+      s.left[id] = Math.max(s.left[id] ?? 0, t)
+      if (state.groups[id]) await removeGroupLocally(s, id)
+    }
     for (const [id, g] of Object.entries(remote.groups)) {
       if (!state.groups[id] && !s.left[id] && g.members.includes(s.me)) state.groups[id] = g
     }
@@ -610,7 +621,7 @@ function updateContactFromPin(s: Session, id: string, patch: Partial<Contact> = 
   const changed = !!serverKeys && !sameKeys(pinKeys(pin), serverKeys)
   state.contacts[id] = {
     id,
-    name: server?.name ?? pin.name,
+    name: pin.name,
     friend: prev?.friend ?? false,
     online: prev?.online ?? false,
     fingerprint: fingerprint(pinKeys(pin)),
@@ -628,11 +639,10 @@ function applyServerUser(s: Session, raw: unknown, opts: { pin: boolean; friend?
   s.serverUsers[u.id] = u
   let added = false
   if (!s.pins[u.id] && opts.pin) {
-    s.pins[u.id] = { name: u.name, signPk: u.signPk, encPk: u.encPk, verified: false, at: Date.now() }
+    s.pins[u.id] = { name: u.name, signPk: u.signPk, encPk: u.encPk, verified: false, at: 0 }
     added = true
-  } else if (s.pins[u.id] && s.pins[u.id]!.name !== u.name) {
-    s.pins[u.id]!.name = u.name
   }
+  // A pinned contact's name never changes (usernames are fixed), so the server can't relabel keys.
   const patch: Partial<Contact> = {}
   if (opts.friend !== undefined) {
     patch.friend = opts.friend
@@ -861,8 +871,14 @@ async function receiveEnvelope(s: Session, seq: number, env: Envelope) {
   try {
     plain = openEnvelope(s.identity, s.me, signPk, env)
   } catch (e) {
-    console.warn(`dropping undecryptable message from ${sender}:`, e)
-    return
+    const retired = s.retiredPins[sender]
+    try {
+      if (!retired) throw e
+      plain = openEnvelope(s.identity, s.me, unb64(retired.signPk), env)
+    } catch {
+      console.warn(`dropping undecryptable message from ${sender}:`, e)
+      return
+    }
   }
   // The envelope is authentic: whatever happens next, never process it twice.
   try {
@@ -888,8 +904,8 @@ async function handlePayload(
 ) {
   const me = s.me
   const mine = sender === me
-  /** Strangers can only reach us through groups we're already in. */
-  const trusted = mine || !!s.pins[sender] || !!state.contacts[sender]?.friend
+  /** Only friends can DM me or put me in a new group; others reach me only in groups I'm already in. */
+  const trusted = mine || !!state.contacts[sender]?.friend
   if (!recipients.includes(me)) return
 
   if (body.t === 'group') {
@@ -899,11 +915,10 @@ async function handlePayload(
     const conv: ConvId = `g:${body.id}`
     const existing = state.groups[body.id]
     if (!existing) {
-      if (!proposed.includes(me) || !trusted) return
+      if (!proposed.includes(me) || !trusted || s.left[body.id]) return
       const name = cleanLabel(body.name, 64) || 'Group'
       await ensurePinned(s, proposed).catch(noop)
       state.groups[body.id] = { id: body.id, name, members: proposed }
-      delete s.left[body.id]
       groupsChanged(s)
       const others = proposed.filter((id) => id !== me && id !== sender)
       await systemMessage(
@@ -1188,8 +1203,10 @@ async function loadSession(saved: Saved): Promise<Session> {
 async function begin(conn: Conn, w: Welcome, server: string, identity: Identity, token: string, cursor: number) {
   if (!validId(w.me?.id)) throw new Error('Unexpected reply from the server')
   const prev = await get<Saved>(K.session, db)
+  let replay = false
   if (!prev || prev.id !== w.me.id || prev.server !== server) {
     await clear(db)
+    replay = cursor > 0 // the server is syncing from a cursor that belonged to other data
     cursor = 0
   }
   const saved: Saved = { server, id: w.me.id, username: w.me.username, token, identity }
@@ -1202,13 +1219,18 @@ async function begin(conn: Conn, w: Welcome, server: string, identity: Identity,
   }
   const s = await loadSession(saved)
   s.fresh = cursor === 0
+  if (replay) {
+    conn.close()
+    void reconnect(s)
+    return
+  }
   attach(s, conn, w)
 }
 
 function checkUsername(input: string): string {
-  const u = input.trim().toLowerCase()
+  const u = input.trim()
   if (!USERNAME_RE.test(u)) {
-    throw new Error('Username must be 3-24 characters (a-z, 0-9, _ and .) and start with a letter or digit')
+    throw new Error('Username must be 3-24 characters (letters, digits, _ and .) and start with a letter or digit')
   }
   return u
 }
@@ -1274,7 +1296,7 @@ export async function register(serverInput: string, usernameInput: string, passw
       authKey: b64(keys.authKey),
       signPk: b64(identity.signPk),
       encPk: b64(identity.encPk),
-      bundle: lockIdentity(identity, keys.lockKey, username),
+      bundle: lockIdentity(identity, keys.lockKey, bundleName(username)),
     })
     const w = await conn.next()
     if (w.type !== 'welcome' || !isStr(w.token)) throw new Error('Unexpected reply from the server')
@@ -1296,14 +1318,14 @@ export async function login(serverInput: string, usernameInput: string, password
     if (pre.type !== 'prelogin' || !isStr(pre.salt)) throw new Error('Unexpected reply from the server')
     const keys = await deriveFromPassword(password, unb64(pre.salt))
     const prev = await get<Saved>(K.session, db)
-    const sameAccount = prev?.server === server && prev.username === username
+    const sameAccount = prev?.server === server && bundleName(prev.username) === bundleName(username)
     const cursor = sameAccount ? ((await get<number>(K.cursor, db)) ?? 0) : 0
     conn.send({ type: 'login', username, authKey: b64(keys.authKey), cursor })
     const w = await conn.next()
     if (w.type !== 'welcome' || !isStr(w.token) || !isStr(w.bundle)) throw new Error('Unexpected reply from the server')
     let identity: Identity
     try {
-      identity = unlockIdentity(w.bundle, keys.lockKey, w.me.username)
+      identity = unlockIdentity(w.bundle, keys.lockKey, bundleName(w.me.username))
     } catch {
       throw new Error('Could not unlock your keys with this password')
     }
@@ -1341,7 +1363,7 @@ export async function changePassword(oldPassword: string, newPassword: string) {
     authKey: b64(old.authKey),
     newSalt: b64(newSalt),
     newAuthKey: b64(next.authKey),
-    bundle: lockIdentity(s.identity, next.lockKey, s.saved.username),
+    bundle: lockIdentity(s.identity, next.lockKey, bundleName(s.saved.username)),
   })
 }
 
@@ -1411,7 +1433,9 @@ export async function trustNewKey(id: string, seenFingerprint: string) {
   if (fingerprint(keys) !== seenFingerprint) {
     throw new Error(`${displayName(id)}'s key changed again. Compare the new security code before accepting.`)
   }
-  s.pins[id] = { name: u.name, signPk: u.signPk, encPk: u.encPk, verified: false, at: Date.now() }
+  const old = s.pins[id]
+  if (old) s.retiredPins[id] = old
+  s.pins[id] = { name: old?.name ?? u.name, signPk: u.signPk, encPk: u.encPk, verified: false, at: Date.now() }
   updateContactFromPin(s, id)
   pinsChanged(s)
   await systemMessage(s, `dm:${id}`, `You accepted a new security key for ${displayName(id)}`)
@@ -1471,7 +1495,11 @@ async function sendContent(header: (pc: PayloadConv) => PayloadHeader, local: Pa
   const ts = Date.now()
   recipientKeys(s, to) // throws before anything is shown if a key changed
   const msg: ChatMessage = { id: mid, conv, from: s.me, ts, kind: 'text', status: 'sending', ...local }
-  if (attachment) await set(K.file(mid), attachment, db)
+  if (attachment) {
+    if (!live(s)) return
+    await set(K.file(mid), attachment, db)
+  }
+  if (!live(s)) return
   await appendMessage(s, msg, false)
   s.pendingSends.set(id, { conv, mid })
   try {
