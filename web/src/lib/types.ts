@@ -63,6 +63,20 @@ export interface ChatMessage {
   /** For kind === 'system' (e.g. "alice added bob"). */
   text?: string
   status: 'sending' | 'sent' | 'received' | 'failed'
+  /** When the sender last edited it (ms). Only text messages can be edited. */
+  edited?: number
+  /** Emoji → user IDs who reacted with it (in order). Missing or empty when nobody reacted. */
+  reactions?: Record<string, string[]>
+  /** The message this one replies to, as it looked when the reply arrived. */
+  reply?: ReplyRef
+}
+
+export interface ReplyRef {
+  id: string
+  /** Sender's user ID. */
+  from: string
+  /** Short plain-text preview ("📎 photo.jpg" for files). */
+  preview: string
 }
 
 export interface Conversation {

@@ -45,10 +45,26 @@ export const chat = {
 
   /** Opens a conversation, loads its messages into state.messages, clears unread. */
   open: engine.openConv,
-  /** Sends a Tiptap doc to the active conversation. */
+  /** Sends a Tiptap doc to the active conversation, optionally as a reply to a message. */
   sendText: engine.sendText,
-  /** Sends a file/image to the active conversation. Throws if larger than MAX_FILE_BYTES. */
+  /** Sends a file/image to the active conversation (optionally as a reply). Throws if larger than MAX_FILE_BYTES. */
   sendFile: engine.sendFile,
+  /** Replaces the text of one of my own text messages, for everyone. */
+  editMessage: engine.editMessage,
+  /** Deletes one of my own messages for everyone (it disappears from the chat). */
+  deleteMessage: engine.deleteMessage,
+  /** Toggles my reaction with this emoji on a message. */
+  react: engine.react,
+  /**
+   * Calls `cb` for each new message from someone else that arrives while signed in
+   * (not for history downloaded at sign-in). Returns an unsubscribe function.
+   * Use it for desktop notifications / sounds.
+   */
+  onIncoming: engine.onIncoming,
+  /** Plain-text preview of a message, as shown in the sidebar. */
+  previewText: engine.previewText,
+  /** Where the desktop app can be downloaded. */
+  desktopDownloadUrl: engine.desktopDownloadUrl,
   /** Object URL for a file message's content (cached), or null if unavailable. */
   fileUrl: engine.fileUrl,
   /** Creates a group with me + friends (user IDs) and opens it. Returns its conversation id. */

@@ -1511,11 +1511,13 @@ async function sendContent(header: (pc: PayloadConv) => PayloadHeader, local: Pa
   }
 }
 
-export async function sendText(doc: JSONContent) {
+export async function sendText(doc: JSONContent, replyTo?: ChatMessage | null) {
+  void replyTo
   await sendContent((conv) => ({ conv, body: { t: 'text', doc } }), { kind: 'text', doc })
 }
 
-export async function sendFile(file: File) {
+export async function sendFile(file: File, replyTo?: ChatMessage | null) {
+  void replyTo
   if (file.size > MAX_FILE_BYTES) {
     throw new Error(`File is too large (max ${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB)`)
   }
@@ -1597,4 +1599,32 @@ export async function leaveGroup(groupId: string) {
   const others = g.members.filter((id) => id !== s.me && s.pins[id])
   sendEnvelope(s, others, { conv: { t: 'g', id: g.id }, body: { t: 'leave', id: g.id } })
   await removeGroupLocally(s, groupId)
+}
+
+// ---------------------------------------------------------------------------
+// Public API: edit, delete, react (stubs, implemented below)
+// ---------------------------------------------------------------------------
+
+export const desktopDownloadUrl: string =
+  (import.meta.env.VITE_DOWNLOAD_URL as string | undefined) || 'https://github.com/AVMG20/e2ee-chat/releases/latest'
+
+export async function editMessage(msg: ChatMessage, doc: JSONContent): Promise<void> {
+  void msg; void doc
+  throw new Error('not implemented')
+}
+export async function deleteMessage(msg: ChatMessage): Promise<void> {
+  void msg
+  throw new Error('not implemented')
+}
+export async function react(msg: ChatMessage, emoji: string): Promise<void> {
+  void msg; void emoji
+  throw new Error('not implemented')
+}
+const incomingListeners = new Set<(m: ChatMessage) => void>()
+export function onIncoming(cb: (m: ChatMessage) => void): () => void {
+  incomingListeners.add(cb)
+  return () => incomingListeners.delete(cb)
+}
+export function previewText(m: ChatMessage): string {
+  return previewOf(m)
 }
