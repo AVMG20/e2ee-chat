@@ -1,0 +1,8 @@
+target/
+node_modules/
+web/dist/
+web/src-tauri/gen/
+data/
+*.db
+*.db-wal
+*.db-shm
