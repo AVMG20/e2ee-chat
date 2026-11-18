@@ -5,6 +5,7 @@ import AddMembersDialog from '@/components/AddMembersDialog.vue'
 import ChangePasswordDialog from '@/components/ChangePasswordDialog.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import ConversationPane from '@/components/ConversationPane.vue'
+import RenameGroupDialog from '@/components/RenameGroupDialog.vue'
 import Rail from '@/components/Rail.vue'
 import Sidebar from '@/components/Sidebar.vue'
 import CommandPalette from '@/components/shell/CommandPalette.vue'
@@ -12,7 +13,7 @@ import FriendsView from '@/components/shell/FriendsView.vue'
 import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
-import { addMembersGroup, openFriends, pendingAction, showChats, showConv, view } from '@/lib/nav'
+import { addMembersGroup, openFriends, pendingAction, renameGroupId, showChats, showConv, view } from '@/lib/nav'
 import { startNotifications } from '@/lib/notify'
 import { accountOpen, friendsOpen, paletteOpen } from '@/lib/ui'
 
@@ -58,6 +59,12 @@ const confirmCopy = computed(() => {
   if (p?.kind === 'leave') {
     return { title: `Leave ${chat.state.groups[p.id]?.name ?? 'group'}?`, description: 'You will stop receiving messages from this group.', label: 'Leave group' }
   }
+  if (p?.kind === 'block') {
+    return { title: `Block ${chat.displayName(p.id)}?`, description: "They won't be able to message you or send friend requests. They won't be told.", label: 'Block' }
+  }
+  if (p?.kind === 'kick') {
+    return { title: `Remove ${chat.displayName(p.id)}?`, description: `They will be removed from ${chat.state.groups[p.group]?.name ?? 'the group'} and stop receiving its messages.`, label: 'Remove from group' }
+  }
   return { title: '', description: '', label: '' }
 })
 
@@ -67,6 +74,8 @@ async function confirmAction() {
   busy.value = true
   try {
     if (p.kind === 'remove') await chat.removeFriend(p.id)
+    else if (p.kind === 'block') await chat.blockUser(p.id)
+    else if (p.kind === 'kick') await chat.removeMember(p.group, p.id)
     else await chat.leaveGroup(p.id)
     pendingAction.value = null
   } catch (e) {
@@ -80,6 +89,12 @@ const membersGroup = computed(() => (addMembersGroup.value ? chat.state.groups[a
 const membersOpen = computed({
   get: () => membersGroup.value !== null,
   set: (v) => { if (!v) addMembersGroup.value = null },
+})
+
+const renameGroup = computed(() => (renameGroupId.value ? chat.state.groups[renameGroupId.value] ?? null : null))
+const renameOpen = computed({
+  get: () => renameGroup.value !== null,
+  set: (v) => { if (!v) renameGroupId.value = null },
 })
 
 function onKey(e: KeyboardEvent) {
@@ -111,6 +126,7 @@ onBeforeUnmount(() => {
     <ChangePasswordDialog v-model:open="pwOpen" />
     <CommandPalette v-model:open="paletteOpen" />
     <AddMembersDialog v-if="membersGroup" v-model:open="membersOpen" :group="membersGroup" />
+    <RenameGroupDialog v-if="renameGroup" v-model:open="renameOpen" :group="renameGroup" />
     <ConfirmDialog
       v-model:open="signOutOpen"
       title="Sign out?"

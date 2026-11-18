@@ -2,10 +2,12 @@
 
 A self-hosted, end-to-end encrypted chat app for you and your friends. Use it in the browser or in the desktop app (Windows, macOS, Linux). The server stores and relays only encrypted data. It can't read your messages, files or group names.
 
-- Direct messages and group chats
-- Add friends by their user ID (`7K3Q-X9PA`)
+- Direct messages and group chats with admins
+- Add friends by their user ID (`7K3Q-X9PA`), block anyone
 - Rich text, code blocks with syntax highlighting, replies, reactions, edit and delete
+- Read receipts (optional), typing indicators, profile pictures
 - Encrypted files and images (up to 10 MB)
+- Search, pinned, muted and archived chats
 - History on all your devices
 - One Rust binary with SQLite, nothing else to run
 
@@ -15,7 +17,7 @@ A self-hosted, end-to-end encrypted chat app for you and your friends. Use it in
 - Every message is encrypted for each recipient and signed by the sender. The server can't read, forge or alter messages.
 - Each friend's key is remembered when you first add them. If it ever changes, you get a warning.
 
-**The server can see:** usernames, IDs, friend lists, IP addresses, when you're online, and who messages whom, when, and how much.
+**The server can see:** usernames, IDs, friend and block lists, IP addresses, when you're online, and who messages whom, when, and how much.
 
 **Limitations:**
 - No forward secrecy. If your keys leak, so does your history.

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Check, ChevronRight, Copy, Hash, Loader2, Moon, Plus, Search, Settings, Sun, TriangleAlert, UserPlus, Users } from 'lucide-vue-next'
+import { Archive, BellOff, Check, ChevronRight, ChevronDown, Copy, Hash, Loader2, Moon, Pin, Plus, Search, Settings, Sun, TriangleAlert, UserPlus, Users } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import NewGroupDialog from '@/components/NewGroupDialog.vue'
 import EntryMenu from '@/components/shell/EntryMenu.vue'
@@ -21,8 +21,11 @@ const myId = computed(() => chat.formatId(chat.state.account?.id ?? ''))
 const isMac = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.platform)
 
 // chat.state.conversations is already newest-first; keep that order within each section.
-const dms = computed(() => chat.state.conversations.filter((c) => c.kind === 'dm'))
-const groups = computed(() => chat.state.conversations.filter((c) => c.kind === 'group'))
+const active = computed(() => chat.state.conversations.filter((c) => !c.archived))
+const dms = computed(() => active.value.filter((c) => c.kind === 'dm'))
+const groups = computed(() => active.value.filter((c) => c.kind === 'group'))
+const archived = computed(() => chat.state.conversations.filter((c) => c.archived))
+const archiveOpen = ref(false)
 
 function draftOf(c: Conversation) {
   const d = c.id === chat.state.active ? undefined : drafts.get(c.id)
@@ -91,7 +94,7 @@ async function select(c: Conversation) {
                 :style="{ '--dot-ring': chat.state.active === c.id ? 'var(--active)' : 'var(--sidebar)' }"
                 @click="select(c)"
               >
-                <UserAvatar :name="c.title" :id="idOf(c)" :size="32" :online="contactOf(c)?.online" />
+                <UserAvatar :name="c.title" :id="idOf(c)" :src="contactOf(c)?.avatar" :size="32" :online="contactOf(c)?.online" />
                 <span class="min-w-0 flex-1 leading-tight">
                   <span class="flex items-baseline gap-1.5">
                     <span class="min-w-0 flex-1 truncate text-[15px]" :class="c.unread > 0 ? 'font-semibold' : 'font-medium'">{{ c.title }}</span>
@@ -100,7 +103,9 @@ async function select(c: Conversation) {
                   </span>
                   <span class="mt-0.5 flex items-center gap-1.5">
                     <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground"><template v-if="draftOf(c)"><span class="font-semibold text-destructive">Draft:</span> {{ draftOf(c) }}</template><template v-else>{{ c.preview }}</template></span>
-                    <span v-if="c.unread > 0" class="unread shrink-0">{{ c.unread > 99 ? '99+' : c.unread }}</span>
+                    <Pin v-if="c.pinned" class="size-3 shrink-0 text-muted-foreground" aria-label="Pinned" />
+                    <BellOff v-if="c.muted" class="size-3 shrink-0 text-muted-foreground" aria-label="Muted" />
+                    <span v-if="c.unread > 0" class="unread shrink-0" :class="c.muted && '!bg-zinc-500'">{{ c.unread > 99 ? '99+' : c.unread }}</span>
                   </span>
                 </span>
               </button>
@@ -131,9 +136,38 @@ async function select(c: Conversation) {
                   </span>
                   <span class="mt-0.5 flex items-center gap-1.5">
                     <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground"><template v-if="draftOf(c)"><span class="font-semibold text-destructive">Draft:</span> {{ draftOf(c) }}</template><template v-else>{{ c.preview }}</template></span>
-                    <span v-if="c.unread > 0" class="unread shrink-0">{{ c.unread > 99 ? '99+' : c.unread }}</span>
+                    <Pin v-if="c.pinned" class="size-3 shrink-0 text-muted-foreground" aria-label="Pinned" />
+                    <BellOff v-if="c.muted" class="size-3 shrink-0 text-muted-foreground" aria-label="Muted" />
+                    <span v-if="c.unread > 0" class="unread shrink-0" :class="c.muted && '!bg-zinc-500'">{{ c.unread > 99 ? '99+' : c.unread }}</span>
                   </span>
                 </span>
+              </button>
+            </EntryMenu>
+          </li>
+        </ul>
+      </section>
+
+      <section v-if="archived.length" class="mt-3">
+        <button
+          class="flex w-full items-center gap-1.5 rounded-md px-1.5 pt-2 pb-1 text-left outline-none focus-visible:shadow-[var(--glow)]"
+          :aria-expanded="archiveOpen" @click="archiveOpen = !archiveOpen"
+        >
+          <ChevronDown class="size-3.5 text-muted-foreground transition-transform" :class="!archiveOpen && '-rotate-90'" />
+          <h2 class="eyebrow flex items-center gap-1.5"><Archive class="size-3.5" />Archived ({{ archived.length }})</h2>
+        </button>
+        <ul v-if="archiveOpen" class="space-y-px">
+          <li v-for="c in archived" :key="c.id">
+            <EntryMenu :kind="c.kind" :id="idOf(c)">
+              <button
+                class="row flex h-12 w-full items-center gap-2.5 rounded-md px-2 text-left outline-none focus-visible:shadow-[var(--glow)]"
+                :data-active="chat.state.active === c.id" :data-unread="c.unread > 0"
+                :style="{ '--dot-ring': chat.state.active === c.id ? 'var(--active)' : 'var(--sidebar)' }"
+                @click="select(c)"
+              >
+                <UserAvatar v-if="c.kind === 'dm'" :name="c.title" :id="idOf(c)" :src="contactOf(c)?.avatar" :size="32" :online="contactOf(c)?.online" />
+                <span v-else class="flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><Hash class="size-4" /></span>
+                <span class="min-w-0 flex-1 truncate text-[15px] font-medium">{{ c.title }}</span>
+                <span v-if="c.unread > 0" class="unread shrink-0" :class="c.muted && '!bg-zinc-500'">{{ c.unread > 99 ? '99+' : c.unread }}</span>
               </button>
             </EntryMenu>
           </li>
@@ -144,7 +178,7 @@ async function select(c: Conversation) {
     <!-- user panel -->
     <div class="flex h-[3.25rem] shrink-0 items-center gap-2 bg-rail/60 px-2" style="--dot-ring: color-mix(in srgb, var(--rail) 60%, var(--sidebar))">
       <button class="flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 text-left outline-none transition-colors hover:bg-hover focus-visible:shadow-[var(--glow)]" title="Copy your ID" @click="copy(myId)">
-        <UserAvatar :name="chat.state.account?.username ?? '?'" :id="chat.state.account?.id" :size="32" :online="chat.state.status === 'online'" />
+        <UserAvatar :name="chat.state.account?.username ?? '?'" :id="chat.state.account?.id" :src="chat.state.account?.avatar" :size="32" :online="chat.state.status === 'online'" />
         <span class="min-w-0 flex-1 leading-tight">
           <span class="block truncate text-[13px] font-semibold">{{ chat.state.account?.username }}</span>
           <span class="block truncate font-mono text-[11px] text-muted-foreground">{{ copied ? 'ID copied' : myId }}</span>

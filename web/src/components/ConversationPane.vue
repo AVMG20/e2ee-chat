@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import {
-  ArrowLeft, Copy, Ellipsis, Hash, Loader2, LogOut, MessageCircle, ShieldAlert, ShieldCheck, Upload, UserPlus, Users,
+  ArrowLeft, Copy, Ellipsis, Hash, Loader2, LogOut, MessageCircle, Pencil, Search, ShieldAlert, ShieldCheck, Upload, UserMinus, UserPlus, Users,
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import {
@@ -17,7 +17,8 @@ import MessageList from '@/components/MessageList.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
-import { copyText, friendsOpen } from '@/lib/ui'
+import { renameGroupId, pendingAction } from '@/lib/nav'
+import { copyText, friendsOpen, paletteOpen } from '@/lib/ui'
 
 defineEmits<{ back: [] }>()
 
@@ -31,6 +32,18 @@ const nameOf = (id: string) => chat.displayName(id)
 const group = computed(() =>
   conv.value?.kind === 'group' ? chat.state.groups[conv.value.id.slice(2)] ?? null : null,
 )
+
+const isAdmin = computed(() => (group.value ? chat.isGroupAdmin(group.value.id) : false))
+const adminOf = (m: string) => !!group.value?.admins?.includes(m)
+
+async function setAdmin(m: string, on: boolean) {
+  if (!group.value) return
+  try {
+    await chat.setAdmin(group.value.id, m, on)
+  } catch (e) {
+    toast.error(errMsg(e))
+  }
+}
 
 const membersOpen = ref(false)
 const addOpen = ref(false)
@@ -125,13 +138,16 @@ async function leave() {
       <header class="flex h-12 shrink-0 items-center gap-2.5 border-b border-line px-3 shadow-sm">
         <button class="btn btn-ghost btn-icon btn-sm md:hidden" title="Back" aria-label="Back" @click="$emit('back')"><ArrowLeft /></button>
         <Hash v-if="group" class="size-5 shrink-0 text-muted-foreground" />
-        <UserAvatar v-else :name="conv.title" :id="convKey" :size="28" :online="contact?.online" style="--dot-ring: var(--background)" />
+        <UserAvatar v-else :name="conv.title" :id="convKey" :src="contact?.avatar" :size="28" :online="contact?.online" style="--dot-ring: var(--background)" />
         <div class="flex min-w-0 flex-1 items-baseline gap-2.5">
           <h1 class="truncate text-[15px] font-bold">{{ conv.title }}</h1>
+          <button v-if="group && isAdmin" class="self-center text-muted-foreground hover:text-foreground" title="Rename group" aria-label="Rename group" @click="renameGroupId = group.id"><Pencil class="size-3.5" /></button>
           <ShieldCheck v-if="contact?.verified" class="size-4 shrink-0 self-center text-success" title="Verified" />
           <span v-if="contact" class="hidden truncate text-xs text-muted-foreground sm:inline">{{ contact.online ? 'Online' : 'Offline' }}</span>
           <button v-else-if="group" class="truncate text-xs text-muted-foreground hover:text-foreground hover:underline" @click="membersOpen = true">{{ group.members.length }} members</button>
         </div>
+
+        <button class="btn btn-ghost btn-icon btn-sm" title="Search messages" aria-label="Search messages" @click="paletteOpen = true"><Search /></button>
 
         <DropdownMenu v-if="group">
           <DropdownMenuTrigger as-child>
@@ -140,6 +156,7 @@ async function leave() {
           <DropdownMenuContent align="end" class="w-48">
             <DropdownMenuItem @select="membersOpen = true"><Users />Members</DropdownMenuItem>
             <DropdownMenuItem @select="addOpen = true"><UserPlus />Add members</DropdownMenuItem>
+            <DropdownMenuItem v-if="isAdmin" @select="renameGroupId = group.id"><Pencil />Rename group</DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" @select="leaveOpen = true"><LogOut />Leave group</DropdownMenuItem>
           </DropdownMenuContent>
@@ -189,10 +206,24 @@ async function leave() {
             </DialogHeader>
             <ul class="well max-h-72 space-y-0.5 overflow-y-auto rounded-md p-1.5 text-sm">
               <li v-for="m in group.members" :key="m" class="flex items-center gap-3 rounded-md px-2 py-1.5" style="--dot-ring: var(--card)">
-                <UserAvatar :name="nameOf(m)" :id="m" :size="32" :online="m === chat.state.account?.id ? true : chat.state.contacts[m]?.friend ? !!chat.state.contacts[m]?.online : undefined" />
-                <span class="flex-1 font-medium">{{ nameOf(m) }}</span>
+                <UserAvatar :name="nameOf(m)" :id="m" :src="m === chat.state.account?.id ? chat.state.account?.avatar : chat.state.contacts[m]?.avatar" :size="32" :online="m === chat.state.account?.id ? true : chat.state.contacts[m]?.friend ? !!chat.state.contacts[m]?.online : undefined" />
+                <span class="min-w-0 flex-1 truncate font-medium">{{ nameOf(m) }}</span>
+                <span v-if="adminOf(m)" class="rounded bg-primary/15 px-1.5 py-px text-[11px] font-semibold text-[var(--link)]">Admin</span>
                 <span v-if="m === chat.state.account?.id" class="text-xs text-muted-foreground">you</span>
                 <button v-else-if="!chat.state.contacts[m]?.friend" class="btn btn-soft btn-sm" @click="addFriend(m)"><UserPlus />Add friend</button>
+                <DropdownMenu v-if="isAdmin && m !== chat.state.account?.id">
+                  <DropdownMenuTrigger as-child>
+                    <button class="btn btn-ghost btn-icon btn-sm" title="Member options" aria-label="Member options"><Ellipsis /></button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" class="w-48">
+                    <template v-if="group.admins">
+                      <DropdownMenuItem v-if="adminOf(m)" @select="setAdmin(m, false)"><ShieldCheck />Remove as admin</DropdownMenuItem>
+                      <DropdownMenuItem v-else @select="setAdmin(m, true)"><ShieldCheck />Make admin</DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                    </template>
+                    <DropdownMenuItem variant="destructive" @select="pendingAction = { kind: 'kick', id: m, group: group.id }"><UserMinus />Remove from group</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </li>
             </ul>
           </DialogContent>

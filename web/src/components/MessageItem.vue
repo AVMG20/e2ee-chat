@@ -24,9 +24,13 @@ const props = defineProps<{
   /** First message of a run from the same sender (shows avatar + name). */
   head: boolean
   animate: boolean
+  /** "Seen"/"Sent" line, only passed for my last sent message. */
+  receipt?: { text: string; title?: string } | null
 }>()
 const emit = defineEmits<{ jump: [id: string] }>()
 
+const avatarOf = (id: string) =>
+  id === chat.state.account?.id ? chat.state.account.avatar : chat.state.contacts[id]?.avatar ?? null
 const mine = computed(() => props.msg.from === myId())
 const name = computed(() => (mine.value ? chat.state.account!.username : chat.displayName(props.msg.from)))
 const replyName = computed(() => (props.msg.reply ? chat.displayName(props.msg.reply.from) : ''))
@@ -129,7 +133,7 @@ function askDelete(e?: MouseEvent) {
 
         <div class="flex gap-4">
           <div class="w-10 shrink-0 pt-0.5">
-            <UserAvatar v-if="head" :name="name" :id="msg.from" :size="40" />
+            <UserAvatar v-if="head" :name="name" :id="msg.from" :src="avatarOf(msg.from)" :size="40" />
             <span v-else class="hidden pt-1 text-right text-[10px] text-muted-foreground group-hover:block">{{ time }}</span>
           </div>
 
@@ -150,6 +154,7 @@ function askDelete(e?: MouseEvent) {
             </div>
             <Clock v-if="msg.status === 'sending' && !head" class="mt-0.5 size-3 text-muted-foreground" aria-label="Sending" />
             <ReactionBar :msg="msg" />
+            <div v-if="receipt && !failed" class="mt-0.5 text-right text-xs text-muted-foreground" :title="receipt.title">{{ receipt.text }}</div>
           </div>
         </div>
 

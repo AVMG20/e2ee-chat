@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowDown } from 'lucide-vue-next'
+import { ArrowDown, Loader2 } from 'lucide-vue-next'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import ImageViewer from '@/components/messages/ImageViewer.vue'
 import MessageItem from '@/components/MessageItem.vue'
 import MessageSheet from '@/components/messages/MessageSheet.vue'
 import { deleteMsg, deleteTarget, editingId, extra, flashId, sheetMsg, viewerId } from '@/components/messages/state'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
-import { formatDate } from '@/lib/format'
+import { errMsg, formatDate } from '@/lib/format'
 
 const scroller = ref<HTMLElement | null>(null)
 const content = ref<HTMLElement | null>(null)
@@ -28,6 +29,33 @@ function onScroll() {
   if (!el) return
   stick = el.scrollHeight - el.scrollTop - el.clientHeight < 120
   atBottom.value = stick
+  if (el.scrollTop < 300) void loadMore()
+}
+
+// ---------- paging ----------
+const loadingOlder = ref(false)
+async function loadMore() {
+  const el = scroller.value
+  if (!el || loadingOlder.value || !chat.state.hasOlder || !chat.state.active) return
+  loadingOlder.value = true
+  const conv = chat.state.active
+  const prevH = el.scrollHeight
+  const prevTop = el.scrollTop
+  try {
+    await chat.loadOlder()
+  } catch (e) {
+    toast.error(errMsg(e))
+    loadingOlder.value = false
+    return
+  }
+  if (chat.state.active === conv) {
+    await nextTick()
+    // Prepended rows push content down; compensate so the view stays put.
+    el.scrollTop = prevTop + (el.scrollHeight - prevH)
+  }
+  loadingOlder.value = false
+  // Short pages may still leave us near the top.
+  if (el.scrollTop < 300 && chat.state.hasOlder) void loadMore()
 }
 
 function toBottom(smooth = false) {
@@ -44,14 +72,40 @@ function find(id: string): HTMLElement | null {
   return scroller.value?.querySelector<HTMLElement>(`[data-mid="${CSS.escape(id)}"]`) ?? null
 }
 
-function jump(id: string) {
+/** Scrolls to a loaded message and flashes it. Returns false if it isn't on screen. */
+function reveal(id: string): boolean {
   const el = find(id)
-  if (!el) return
-  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  if (!el) return false
+  stick = false
+  el.scrollIntoView({ block: 'center' })
   flashId.value = id
   clearTimeout(flashTimer)
   flashTimer = setTimeout(() => (flashId.value = null), 1600)
+  return true
 }
+
+async function jump(id: string) {
+  if (reveal(id)) return
+  const conv = chat.state.active
+  if (!conv) return
+  try {
+    await chat.open(conv, id)
+  } catch (e) {
+    toast.error(errMsg(e))
+  }
+}
+
+watch(
+  [() => chat.state.highlight, () => chat.state.messages.length],
+  async () => {
+    const id = chat.state.highlight
+    if (!id) return
+    await nextTick()
+    if (reveal(id)) chat.state.highlight = null
+  },
+  { flush: 'post', immediate: true },
+)
+
 
 /** On open: if the first unread message is above the fold, scroll to it. */
 function settleUnread() {
@@ -130,6 +184,21 @@ const rows = computed(() => {
   })
 })
 
+// "Seen" line under my last sent message.
+const receipt = computed<{ id: string; text: string; title?: string } | null>(() => {
+  const me = chat.state.account?.id
+  const ms = chat.state.messages
+  const last = [...ms].reverse().find((m) => m.kind !== 'system' && m.from === me)
+  if (!me || !last || last.status === 'sending' || last.status === 'failed') return null
+  const conv = chat.state.active ?? ''
+  const members = conv.startsWith('g:') ? chat.state.groups[conv.slice(2)]?.members ?? [] : [conv.slice(3)]
+  const seen = members.filter((u) => u !== me && (chat.state.reads[u] ?? 0) >= last.ts)
+  if (!seen.length) return { id: last.id, text: 'Sent' }
+  if (!conv.startsWith('g:')) return { id: last.id, text: 'Seen' }
+  const names = seen.map((u) => chat.displayName(u))
+  return { id: last.id, text: names.length <= 3 ? `Seen by ${names.join(', ')}` : `Seen by ${names.length}`, title: names.join(', ') }
+})
+
 const confirmOpen = computed({
   get: () => !!deleteTarget.value,
   set: (v) => {
@@ -156,8 +225,12 @@ watch(() => chat.state.active, () => {
 <template>
   <div class="relative min-h-0 flex-1">
     <TooltipProvider :delay-duration="200">
-      <div ref="scroller" class="h-full overflow-y-auto pt-4 pb-4" @scroll="onScroll">
+      <div ref="scroller" class="h-full overflow-y-auto pt-4 pb-4 [overflow-anchor:none]" @scroll="onScroll">
         <div ref="content">
+          <div v-if="loadingOlder" class="flex items-center justify-center gap-2 py-2 text-xs text-muted-foreground" role="status">
+            <Loader2 class="size-3.5 animate-spin" />Loading…
+          </div>
+          <div v-else-if="!chat.state.hasOlder && rows.length > 20" class="py-2 text-center text-[11px] text-muted-foreground/70">Beginning of the conversation</div>
           <div v-if="!rows.length" class="px-6 py-16 text-center text-sm text-muted-foreground">
             This is the start of the conversation. Say hello!
           </div>
@@ -169,7 +242,7 @@ watch(() => chat.state.active, () => {
               <span class="h-px flex-1 bg-destructive/70" />
               <span class="rounded-sm bg-destructive px-1.5 py-px text-[10px] leading-4 font-bold text-white uppercase">New</span>
             </div>
-            <MessageItem :msg="r.m" :head="r.head" :animate="animate" @jump="jump" />
+            <MessageItem :msg="r.m" :head="r.head" :animate="animate" :receipt="receipt?.id === r.m.id ? receipt : null" @jump="jump" />
           </template>
         </div>
       </div>

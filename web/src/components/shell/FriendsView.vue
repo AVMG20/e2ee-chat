@@ -1,17 +1,18 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ArrowLeft, Check, Loader2, MessageSquare, MoreHorizontal, Search, TriangleAlert, UserPlus, Users, X } from 'lucide-vue-next'
+import { ArrowLeft, Ban, Check, Loader2, MessageSquare, MoreHorizontal, Search, TriangleAlert, UserPlus, Users, X } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import UserAvatar from '@/components/UserAvatar.vue'
 import CopyIdButton from '@/components/shell/CopyIdButton.vue'
 import EntryMenu from '@/components/shell/EntryMenu.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
-import { friendsTab as tab, openDm, showChats, type FriendsTab } from '@/lib/nav'
+import { friendsTab as tab, openDm, pendingAction, showChats, type FriendsTab } from '@/lib/nav'
 import type { Contact } from '@/lib/types'
 
 const incoming = computed(() => chat.state.requests.incoming)
 const outgoing = computed(() => chat.state.requests.outgoing)
+const blocked = computed(() => chat.state.blocked)
 const pendingCount = computed(() => incoming.value.length)
 const friends = computed(() =>
   Object.values(chat.state.contacts).filter((c) => c.friend).sort((a, b) => a.name.localeCompare(b.name)),
@@ -29,6 +30,7 @@ const tabs = computed<{ key: FriendsTab; label: string; count?: number }[]>(() =
   { key: 'online', label: 'Online' },
   { key: 'all', label: 'All' },
   { key: 'pending', label: 'Pending', count: pendingCount.value },
+  { key: 'blocked', label: 'Blocked' },
 ])
 
 const myId = computed(() => chat.state.account?.id ?? '')
@@ -126,7 +128,7 @@ function openMenu(e: MouseEvent) {
                   data-friend-row class="row group/row flex items-center gap-3 rounded-md px-2 py-2 text-foreground"
                   style="--dot-ring: var(--background)"
                 >
-                  <UserAvatar :name="c.name" :id="c.id" :size="36" :online="c.online" />
+                  <UserAvatar :name="c.name" :id="c.id" :src="c.avatar" :size="36" :online="c.online" />
                   <div class="min-w-0 flex-1 leading-tight">
                     <div class="flex items-center gap-1.5">
                       <span class="truncate text-[15px] font-semibold">{{ c.name }}</span>
@@ -159,11 +161,12 @@ function openMenu(e: MouseEvent) {
             <div class="eyebrow mb-2 px-2">Incoming · {{ incoming.length }}</div>
             <ul class="space-y-px">
               <li v-for="r in incoming" :key="r.id" class="row flex items-center gap-3 rounded-md px-2 py-2 text-foreground">
-                <UserAvatar :name="r.name" :id="r.id" :size="36" />
+                <UserAvatar :name="r.name" :id="r.id" :src="chat.state.contacts[r.id]?.avatar" :size="36" />
                 <div class="min-w-0 flex-1 leading-tight">
                   <div class="truncate text-[15px] font-semibold">{{ r.name }}</div>
                   <div class="truncate font-mono text-xs text-muted-foreground">{{ chat.formatId(r.id) }}</div>
                 </div>
+                <button class="btn btn-ghost btn-icon btn-sm hover:!text-destructive" title="Block" aria-label="Block" @click="pendingAction = { kind: 'block', id: r.id }"><Ban /></button>
                 <button class="btn btn-ghost btn-icon btn-sm hover:!text-destructive" title="Decline" aria-label="Decline" :disabled="working === 'd' + r.id" @click="act('d' + r.id, () => chat.declineFriend(r.id))"><X /></button>
                 <button class="btn btn-primary btn-sm" :disabled="working === 'a' + r.id" @click="act('a' + r.id, () => chat.acceptFriend(r.id))">
                   <Loader2 v-if="working === 'a' + r.id" class="animate-spin" /><Check v-else />Accept
@@ -175,7 +178,7 @@ function openMenu(e: MouseEvent) {
             <div class="eyebrow mb-2 px-2">Sent · {{ outgoing.length }}</div>
             <ul class="space-y-px">
               <li v-for="r in outgoing" :key="r.id" class="row flex items-center gap-3 rounded-md px-2 py-2 text-foreground">
-                <UserAvatar :name="r.name" :id="r.id" :size="36" />
+                <UserAvatar :name="r.name" :id="r.id" :src="chat.state.contacts[r.id]?.avatar" :size="36" />
                 <div class="min-w-0 flex-1 leading-tight">
                   <div class="truncate text-[15px] font-semibold">{{ r.name }}</div>
                   <div class="truncate text-xs text-muted-foreground">Waiting for them · <span class="font-mono">{{ chat.formatId(r.id) }}</span></div>
@@ -187,6 +190,29 @@ function openMenu(e: MouseEvent) {
           <div v-if="!incoming.length && !outgoing.length" class="flex flex-col items-center gap-3 px-4 py-16 text-center">
             <div class="flex size-16 items-center justify-center rounded-full bg-card text-muted-foreground"><UserPlus class="size-7" /></div>
             <p class="text-sm text-muted-foreground">No pending friend requests.</p>
+          </div>
+        </template>
+
+        <!-- Blocked -->
+        <template v-else-if="tab === 'blocked'">
+          <section v-if="blocked.length">
+            <div class="eyebrow mb-2 px-2">Blocked · {{ blocked.length }}</div>
+            <ul class="space-y-px">
+              <li v-for="b in blocked" :key="b.id" class="row flex items-center gap-3 rounded-md px-2 py-2 text-foreground">
+                <UserAvatar :name="b.name" :id="b.id" :size="36" />
+                <div class="min-w-0 flex-1 leading-tight">
+                  <div class="truncate text-[15px] font-semibold">{{ b.name }}</div>
+                  <div class="truncate font-mono text-xs text-muted-foreground">{{ chat.formatId(b.id) }}</div>
+                </div>
+                <button class="btn btn-soft btn-sm" :disabled="working === 'u' + b.id" @click="act('u' + b.id, () => chat.unblockUser(b.id))">
+                  <Loader2 v-if="working === 'u' + b.id" class="animate-spin" />Unblock
+                </button>
+              </li>
+            </ul>
+          </section>
+          <div v-else class="flex flex-col items-center gap-3 px-4 py-16 text-center">
+            <div class="flex size-16 items-center justify-center rounded-full bg-card text-muted-foreground"><Ban class="size-7" /></div>
+            <p class="text-sm text-muted-foreground">You haven't blocked anyone.</p>
           </div>
         </template>
 

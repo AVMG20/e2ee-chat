@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { Hash, Search } from 'lucide-vue-next'
+import { Hash, Loader2, MessageSquare, Search } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
-import { errMsg } from '@/lib/format'
+import { errMsg, relTime } from '@/lib/format'
 import { openConversation } from '@/lib/nav'
-import type { ConvId } from '@/lib/types'
+import type { ConvId, SearchHit } from '@/lib/types'
 
 const open = defineModel<boolean>('open', { required: true })
 
@@ -58,16 +58,80 @@ const results = computed(() => {
     .map((r) => r.it)
 })
 
+// Message search (history on this device), debounced.
+const hits = ref<SearchHit[]>([])
+const searching = ref(false)
+let timer: ReturnType<typeof setTimeout> | undefined
+let seq = 0
+
+function runSearch(q: string) {
+  clearTimeout(timer)
+  const my = ++seq
+  if (!q.trim()) {
+    hits.value = []
+    searching.value = false
+    return
+  }
+  searching.value = true
+  timer = setTimeout(async () => {
+    let found: SearchHit[] = []
+    try {
+      found = await chat.search(q)
+    } catch {
+      /* not signed in / search unavailable */
+    }
+    if (my !== seq) return
+    hits.value = found
+    searching.value = false
+  }, 200)
+}
+
 watch(open, (o) => {
   if (o) {
     query.value = ''
     index.value = 0
+  } else {
+    seq++
+    clearTimeout(timer)
+    hits.value = []
   }
 })
-watch(query, () => (index.value = 0))
+watch(query, (q) => {
+  index.value = 0
+  runSearch(q)
+})
+
+const total = computed(() => results.value.length + hits.value.length)
+
+/** A short excerpt around the first matching word, split into plain and matched parts. */
+function snippet(hit: SearchHit): { t: string; m: boolean }[] {
+  const text = chat.previewText(hit.msg).replace(/\s+/g, ' ')
+  const terms = query.value.toLowerCase().split(/\s+/).filter(Boolean)
+  const lower = text.toLowerCase()
+  const first = Math.min(...terms.map((t) => lower.indexOf(t)).filter((i) => i >= 0), text.length)
+  const start = Math.max(0, first - 24)
+  const cut = (start > 0 ? '…' : '') + text.slice(start, start + 110) + (text.length > start + 110 ? '…' : '')
+  const re = new RegExp(`(${terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi')
+  return terms.length ? cut.split(re).filter(Boolean).map((t) => ({ t, m: terms.includes(t.toLowerCase()) })) : [{ t: cut, m: false }]
+}
+
+async function chooseHit(h: SearchHit | undefined) {
+  if (!h) return
+  open.value = false
+  try {
+    await openConversation(h.conv, h.msg.id)
+  } catch (e) {
+    toast.error(errMsg(e))
+  }
+}
+
+function choose2(n: number) {
+  if (n < results.value.length) return choose(results.value[n])
+  return chooseHit(hits.value[n - results.value.length])
+}
 
 function move(d: number) {
-  const n = results.value.length
+  const n = total.value
   if (!n) return
   index.value = (index.value + d + n) % n
   void nextTick(() => list.value?.querySelector('[data-selected="true"]')?.scrollIntoView({ block: 'nearest' }))
@@ -88,12 +152,12 @@ async function choose(it: Item | undefined) {
   <Dialog v-model:open="open">
     <DialogContent :show-close-button="false" class="top-[16%] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-lg">
       <DialogTitle class="sr-only">Quick switcher</DialogTitle>
-      <DialogDescription class="sr-only">Jump to a friend, direct message or group.</DialogDescription>
+      <DialogDescription class="sr-only">Jump to a friend, direct message or group, or search messages.</DialogDescription>
       <div class="field-icon border-b border-line p-3">
         <Search class="!left-6" />
         <input
-          v-model="query" class="field !h-10" placeholder="Where would you like to go?" aria-label="Search conversations" autocomplete="off" spellcheck="false"
-          @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)" @keydown.enter.prevent="choose(results[index])"
+          v-model="query" class="field !h-10" placeholder="Search chats and messages" aria-label="Search conversations" autocomplete="off" spellcheck="false"
+          @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)" @keydown.enter.prevent="choose2(index)"
         >
       </div>
       <ul ref="list" class="max-h-[min(22rem,50dvh)] overflow-y-auto p-1.5" role="listbox">
@@ -111,7 +175,28 @@ async function choose(it: Item | undefined) {
             <span v-if="it.unread > 0" class="unread shrink-0">{{ it.unread > 99 ? '99+' : it.unread }}</span>
           </button>
         </li>
-        <li v-if="!results.length" class="px-3 py-8 text-center text-sm text-muted-foreground">No matches.</li>
+        <li v-if="!results.length && !hits.length && !searching" class="px-3 py-8 text-center text-sm text-muted-foreground">No matches.</li>
+        <template v-if="hits.length || searching">
+          <li class="eyebrow flex items-center gap-2 px-2 pt-3 pb-1" role="presentation">Messages<Loader2 v-if="searching" class="size-3 animate-spin" /></li>
+          <li v-for="(h, n) in hits" :key="h.msg.conv + h.msg.id" role="option" :aria-selected="results.length + n === index">
+            <button
+              class="row flex w-full items-start gap-3 rounded-md px-2 py-2 text-left outline-none"
+              :data-active="results.length + n === index" :data-selected="results.length + n === index"
+              @mousemove="index = results.length + n" @click="chooseHit(h)"
+            >
+              <span class="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><MessageSquare class="size-4" /></span>
+              <span class="min-w-0 flex-1 leading-tight">
+                <span class="flex items-baseline gap-2">
+                  <span class="min-w-0 flex-1 truncate text-sm font-semibold">{{ h.title }}</span>
+                  <span class="shrink-0 text-[11px] font-normal text-muted-foreground">{{ relTime(h.msg.ts) }}</span>
+                </span>
+                <span class="mt-0.5 line-clamp-2 block break-words text-xs text-muted-foreground">
+                  <span class="font-medium text-foreground/80">{{ chat.displayName(h.msg.from) }}: </span><template v-for="(s, i) in snippet(h)" :key="i"><mark v-if="s.m" class="rounded-sm bg-primary/25 text-foreground">{{ s.t }}</mark><template v-else>{{ s.t }}</template></template>
+                </span>
+              </span>
+            </button>
+          </li>
+        </template>
       </ul>
       <div class="flex items-center gap-4 border-t border-line px-3 py-2 text-xs text-muted-foreground">
         <span><kbd class="font-sans font-semibold">↑↓</kbd> navigate</span>

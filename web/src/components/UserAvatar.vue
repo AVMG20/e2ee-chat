@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { hueOf, initials } from '@/lib/format'
 
 const props = withDefaults(defineProps<{
@@ -9,7 +9,12 @@ const props = withDefaults(defineProps<{
   size?: number
   /** undefined hides the dot. */
   online?: boolean
-}>(), { id: undefined, size: 40, online: undefined })
+  /** Profile picture URL; initials are shown when missing or broken. */
+  src?: string | null
+}>(), { id: undefined, size: 40, online: undefined, src: null })
+
+const broken = ref(false)
+watch(() => props.src, () => (broken.value = false))
 
 const box = computed(() => ({ width: `${props.size}px`, height: `${props.size}px`, '--h': hueOf(props.id ?? props.name) }))
 const dot = computed(() => {
@@ -20,7 +25,9 @@ const dot = computed(() => {
 
 <template>
   <div class="relative shrink-0" :style="box">
+    <img v-if="src && !broken" :src="src" alt="" draggable="false" class="size-full rounded-full object-cover" @error="broken = true">
     <div
+      v-else
       class="hue-bg flex size-full select-none items-center justify-center rounded-full font-semibold tracking-tight"
       :style="{ fontSize: `${Math.round(size * 0.38)}px` }"
     >
