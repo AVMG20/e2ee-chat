@@ -762,7 +762,7 @@ const validConvId = (c: string): c is ConvId =>
   (c.startsWith('dm:') && validId(c.slice(3))) || (c.startsWith('g:') && validGroupId(c.slice(2)))
 
 /** Profile pictures: still images are shrunk to fit easily; animated GIFs are kept as they are, up to this size. */
-const MAX_AVATAR_BYTES = 2 * 1024 * 1024
+const MAX_AVATAR_BYTES = 10 * 1024 * 1024
 
 function parseVault(raw: unknown): VaultData {
   const v = (raw && typeof raw === 'object' ? raw : {}) as Partial<VaultData>
