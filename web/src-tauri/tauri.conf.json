@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "E2EE Chat",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "identifier": "io.github.avmg20.e2eechat",
   "build": {
     "frontendDist": "../dist",
