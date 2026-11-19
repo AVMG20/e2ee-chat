@@ -276,7 +276,24 @@ watch(replyTo, (r) => {
   if (r) editor.value?.commands.focus()
 })
 
+// Type to talk: typing (or pasting) while nothing else takes text puts it in the message box, like Discord.
+function onWindowKey(e: KeyboardEvent) {
+  const ed = editor.value
+  if (!ed || props.disabled || e.defaultPrevented || e.isComposing || ed.isFocused) return
+  const paste = (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'v'
+  const printable = e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey
+  if (!paste && !printable) return
+  const t = e.target as HTMLElement | null
+  if (t?.closest('input, textarea, select, [contenteditable="true"], [role=dialog], [role=menu], [role=listbox]')) return
+  // A space or a key on a focused button means "press it", not "type".
+  if (printable && e.key === ' ' && t?.closest('button, a, [role=button]')) return
+  if (document.querySelector('[role=dialog], [role=menu]')) return
+  ed.commands.focus('end')
+}
+window.addEventListener('keydown', onWindowKey)
+
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onWindowKey)
   const ed = editor.value
   const id = chat.state.active
   if (ed && id && chat.state.account) {
