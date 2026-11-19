@@ -768,7 +768,11 @@ pub fn router(state: Arc<AppState>, web_dir: Option<PathBuf>) -> Router {
         .with_state(state);
     if let Some(dir) = web_dir {
         let index = dir.join("index.html");
-        app = app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)));
+        // Built files: a missing one is a 404, never the app page (an old tab asking for a file
+        // from before a deploy must fail clearly, and the service worker must not cache HTML as JS).
+        app = app
+            .nest_service("/assets", ServeDir::new(dir.join("assets")))
+            .fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)));
     }
     let set = |name, value: &'static str| SetResponseHeaderLayer::if_not_present(name, HeaderValue::from_static(value));
     app.layer(set(header::CONTENT_SECURITY_POLICY, CSP))

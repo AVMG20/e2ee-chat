@@ -492,3 +492,24 @@ async fn sessions_from_older_versions_are_migrated() {
         db.query_row("SELECT sid, revoked FROM sessions", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     assert_eq!((sid.len(), revoked), (18, 0));
 }
+
+#[tokio::test]
+async fn missing_assets_are_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("index.html"), "<!doctype html>").unwrap();
+    std::fs::create_dir(dir.path().join("assets")).unwrap();
+    std::fs::write(dir.path().join("assets/app-1.js"), "export {}").unwrap();
+    let (_, addr, _db) = start_with_web(Some(dir.path().to_path_buf())).await;
+    let get = |path: &'static str| async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let mut resp = String::new();
+        stream.read_to_string(&mut resp).await.unwrap();
+        resp.lines().next().unwrap_or_default().to_string()
+    };
+    assert!(get("/assets/app-1.js").await.contains("200"));
+    assert!(get("/assets/old-2.js").await.contains("404"));
+    // Every other path is the app.
+    assert!(get("/some/page").await.contains("200"));
+}
