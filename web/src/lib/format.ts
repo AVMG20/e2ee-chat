@@ -4,10 +4,6 @@ export function initials(name: string): string {
   return s.toUpperCase()
 }
 
-export function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
-}
-
 export function formatDate(ts: number): string {
   const d = new Date(ts)
   const today = new Date()
@@ -51,9 +47,11 @@ export function relTime(ts: number): string {
   if (!ts) return ''
   const d = new Date(ts)
   const now = new Date()
-  if (d.toDateString() === now.toDateString()) return formatTime(ts)
+  if (d.toDateString() === now.toDateString()) return formatClock(ts)
+  const y = new Date()
+  y.setDate(now.getDate() - 1)
+  if (d.toDateString() === y.toDateString()) return 'Yesterday'
   const days = Math.floor((now.getTime() - ts) / 86_400_000)
-  if (days < 2) return 'Yesterday'
   if (days < 7) return d.toLocaleDateString([], { weekday: 'short' })
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }

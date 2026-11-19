@@ -406,9 +406,13 @@ class Conn {
   private waiter: { resolve: (m: ServerMsg) => void; reject: (e: Error) => void } | null = null
   private handler: ((m: ServerMsg) => void) | null = null
 
+  /** When the server last sent anything (a silent socket is dead). */
+  lastSeen = Date.now()
+
   private constructor(ws: WebSocket) {
     this.ws = ws
     ws.onmessage = (ev) => {
+      this.lastSeen = Date.now()
       if (typeof ev.data !== 'string') return
       let m: ServerMsg
       try {
@@ -1259,6 +1263,18 @@ async function applyChange(s: Session, conv: ConvId, sender: string, body: Paylo
     list.splice(i, 1)
     const j = state.messages.findIndex((x) => x.id === m.id && x.conv === conv)
     if (j >= 0) state.messages.splice(j, 1)
+    if (state.firstUnread === m.id) state.firstUnread = null
+    const meta = s.meta[conv]
+    if (meta?.unread && m.from !== s.me && m.ts > (meta.readTs ?? 0)) {
+      meta.unread = Math.max(0, meta.unread - 1)
+      refreshConversations()
+    }
+    const key = starKey(conv, m.id)
+    if (s.stars[key]?.on) {
+      s.stars[key] = { on: false, at: Math.max(Date.now(), s.stars[key]!.at + 1) }
+      showStars(s)
+      scheduleVaultPush(s)
+    }
     if (m.kind === 'file') {
       await delMany([K.file(m.id)], db)
       const f = s.fileUrls.get(m.id)
@@ -1368,8 +1384,17 @@ function mentionsMe(s: Session, m: ChatMessage): boolean {
  * since a window hidden in the tray doesn't always look hidden to the page.
  */
 let windowActive: boolean | null = null
+/** Is the open chat actually on screen (not the friends view, not the chat list on a phone)? */
+let convVisible = true
 const watching = () =>
-  typeof document !== 'undefined' && document.visibilityState === 'visible' && (windowActive ?? document.hasFocus())
+  convVisible && typeof document !== 'undefined' && document.visibilityState === 'visible' && (windowActive ?? document.hasFocus())
+
+/** The UI says whether the open chat is on screen; messages in it only count as read while it is. */
+export function setConvVisible(visible: boolean) {
+  if (convVisible === visible) return
+  convVisible = visible
+  if (visible) poke()
+}
 
 /** Desktop app: the window gained or lost focus (or was hidden). */
 export function setWindowActive(active: boolean) {
@@ -1447,6 +1472,16 @@ async function sendRead(s: Session) {
 if (typeof window !== 'undefined') {
   window.addEventListener('focus', poke)
   document.addEventListener('visibilitychange', poke)
+  // Back online or back to the app: reconnect now instead of waiting out the backoff.
+  const retryNow = () => {
+    const s = session
+    if (!s || s.closed || s.conn || document.visibilityState !== 'visible') return
+    s.retry = 0
+    clearTimeout(s.reconnectTimer)
+    void reconnect(s)
+  }
+  window.addEventListener('online', retryNow)
+  document.addEventListener('visibilitychange', retryNow)
 }
 
 /** A read receipt: mine (from another device) clears unread here; others' show as "Seen". */
@@ -1944,7 +1979,14 @@ function attach(s: Session, conn: Conn, w: Welcome) {
   })
   conn.attach((m) => dispatch(s, m))
   clearInterval(s.pingTimer)
-  s.pingTimer = setInterval(() => s.conn?.send({ type: 'ping' }), 25_000)
+  s.pingTimer = setInterval(() => {
+    const c = s.conn
+    if (!c) return
+    // Pings are answered within seconds; nothing for a minute means the connection died
+    // (sleep, network change) without the socket noticing.
+    if (Date.now() - c.lastSeen > 60_000) c.close()
+    else c.send({ type: 'ping' })
+  }, 25_000)
   // The socket may have dropped while we were setting up.
   if (conn.closed) onClosed(s, conn)
 }
@@ -2412,7 +2454,8 @@ function releaseFiles(s: Session, keep: ConvId) {
   }
 }
 
-export async function openConv(conv: ConvId, focus?: string) {
+/** Opens a conversation. With `focus`, resolves false if that message isn't there (anymore). */
+export async function openConv(conv: ConvId, focus?: string): Promise<boolean> {
   const s = requireSession()
   state.active = conv
   const meta = s.meta[conv]
@@ -2423,7 +2466,7 @@ export async function openConv(conv: ConvId, focus?: string) {
     refreshConversations()
   }
   const list = await loadConv(s, conv)
-  if (session !== s || state.active !== conv) return
+  if (session !== s || state.active !== conv) return false
   let firstUnread: string | null = null
   for (let i = list.length - 1, n = unread; i >= 0 && n > 0; i--) {
     const m = list[i]!
@@ -2444,6 +2487,13 @@ export async function openConv(conv: ConvId, focus?: string) {
   state.hasOlder = start > 0
   state.reads = { ...dict<number>(s.meta[conv]?.reads) }
   scheduleRead(s)
+  return !focus || focusAt >= 0
+}
+
+/** Is this message (still) in the conversation on this device? */
+export async function hasMessage(conv: ConvId, id: string): Promise<boolean> {
+  const s = requireSession()
+  return (await loadConv(s, conv)).some((m) => m.id === id)
 }
 
 /** Puts the next page of older messages of the active conversation on screen. Resolves false if there are none. */
@@ -2498,6 +2548,9 @@ async function targetsOf(s: Session, conv: ConvId): Promise<{ pc: PayloadConv; t
   if (conv.startsWith('dm:')) {
     const peer = conv.slice(3)
     if (!s.pins[peer]) throw new Error('Unknown contact')
+    // They'd drop it: only friends can message each other directly.
+    if (!state.contacts[peer]?.friend) throw new Error(`You're not friends with ${displayName(peer)}, so messages can't be delivered`)
+    if (state.blocked.some((b) => b.id === peer)) throw new Error(`You blocked ${displayName(peer)}`)
     return { pc: { t: 'dm' }, to: [peer] }
   }
   const g = state.groups[conv.slice(2)]
@@ -2568,8 +2621,8 @@ function sendQueued(s: Session, id: string) {
   }
 }
 
-function replyRef(m?: ChatMessage | null): ReplyRef | undefined {
-  if (!m || m.kind === 'system' || m.conv !== state.active) return undefined
+function replyRef(m?: ChatMessage | null, conv = state.active): ReplyRef | undefined {
+  if (!m || m.kind === 'system' || m.conv !== conv) return undefined
   return { id: m.id, from: m.from, preview: previewOf(m).slice(0, 120) }
 }
 
@@ -2579,13 +2632,14 @@ function activeConv(): ConvId {
   return conv
 }
 
-export async function sendText(doc: JSONContent, replyTo?: ChatMessage | null) {
-  const reply = replyRef(replyTo)
-  await sendContent(activeConv(), (conv) => ({ conv, body: { t: 'text', doc, reply } }), { kind: 'text', doc, reply })
+/** `conv`: the chat to send to (default: the open one). Pass it when sending takes a while, so switching chats can't redirect it. */
+export async function sendText(doc: JSONContent, replyTo?: ChatMessage | null, conv: ConvId = activeConv()) {
+  const reply = replyRef(replyTo, conv)
+  await sendContent(conv, (pc) => ({ conv: pc, body: { t: 'text', doc, reply } }), { kind: 'text', doc, reply })
 }
 
-export async function sendFile(file: File, replyTo?: ChatMessage | null) {
-  const reply = replyRef(replyTo)
+export async function sendFile(file: File, replyTo?: ChatMessage | null, target: ConvId = activeConv()) {
+  const reply = replyRef(replyTo, target)
   if (file.size > MAX_FILE_BYTES) {
     throw new Error(`File is too large (max ${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB)`)
   }
@@ -2593,7 +2647,7 @@ export async function sendFile(file: File, replyTo?: ChatMessage | null) {
   const name = cleanLabel(file.name, 200) || 'file'
   const mime = (file.type || 'application/octet-stream').slice(0, 100)
   await sendContent(
-    activeConv(),
+    target,
     (conv) => ({ conv, body: { t: 'file', name, mime, size: bytes.length, reply } }),
     { kind: 'file', file: { name, mime, size: bytes.length }, reply },
     bytes,
@@ -3422,4 +3476,9 @@ export function setDisplayName(input: string) {
   } catch {
     /* sent after reconnecting (sentAt stays 0) */
   }
+}
+
+/** Does this message mention me (@username or @display name) or reply to me? */
+export function messageMentionsMe(m: ChatMessage): boolean {
+  return !!session && mentionsMe(session, m)
 }

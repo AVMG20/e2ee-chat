@@ -8,6 +8,7 @@ import EntryMenu from '@/components/shell/EntryMenu.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { friendsTab as tab, openDm, pendingAction, showChats, type FriendsTab } from '@/lib/nav'
+import { sendFriendRequestToast } from '@/lib/ui'
 import type { Contact } from '@/lib/types'
 
 const incoming = computed(() => chat.state.requests.incoming)
@@ -49,9 +50,10 @@ async function add() {
   adding.value = true
   addError.value = ''
   try {
-    await chat.sendFriendRequest(input.value)
+    const raw = input.value
+    const target = raw.toUpperCase().replace(/[^0-9A-Z]/g, '').replace(/[IL]/g, '1').replace(/O/g, '0')
+    await sendFriendRequestToast(target, chat.state.contacts[target]?.name ?? chat.state.requests.incoming.find((r) => r.id === target)?.name ?? raw.trim())
     input.value = ''
-    toast.success('Friend request sent')
   } catch (e) {
     addError.value = errMsg(e)
   } finally {

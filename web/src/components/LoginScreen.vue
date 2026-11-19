@@ -100,7 +100,7 @@ async function submit() {
               <label class="label" for="server">Server URL</label>
               <div class="field-icon">
                 <Globe />
-                <input id="server" v-model="server" class="field" type="url" placeholder="https://chat.example.com" required autocomplete="off" :disabled="busy">
+                <input id="server" v-model="server" class="field" type="text" inputmode="url" autocapitalize="off" spellcheck="false" placeholder="https://chat.example.com" required autocomplete="off" :disabled="busy">
               </div>
             </div>
             <div>

@@ -32,3 +32,18 @@ describe('fencesToCodeBlocks', () => {
     expect(out.content).toEqual([{ type: 'codeBlock', attrs: { language: null }, content: [t('npm i')] }])
   })
 })
+
+describe('docToPlainText', () => {
+  test('keeps lines, lists and code', async () => {
+    const { docToPlainText } = await import('../src/lib/plaintext')
+    const doc = {
+      type: 'doc',
+      content: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'line one' }, { type: 'hardBreak' }, { type: 'text', text: 'line two' }] },
+        { type: 'bulletList', content: [{ type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'a' }] }] }] },
+        { type: 'codeBlock', content: [{ type: 'text', text: 'x  =  1\n  y' }] },
+      ],
+    }
+    expect(docToPlainText(doc)).toBe('line one\nline two\n- a\nx  =  1\n  y')
+  })
+})

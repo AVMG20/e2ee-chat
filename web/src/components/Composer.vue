@@ -9,7 +9,8 @@ import {
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import EmojiPicker from '@/components/messages/EmojiPicker.vue'
-import { drafts, extra, myId, replyTo, sendTyping, startEditLast } from '@/components/messages/state'
+import { drafts, extra, myId, queues, replyTo, sendTyping, startEditLast, type Queued } from '@/components/messages/state'
+import { codeFenceShortcut } from '@/components/messages/codefence'
 import { chat } from '@/lib/chat'
 import { fencesToCodeBlocks } from '@/lib/code/fences'
 import { editorExtensions } from '@/lib/editor'
@@ -19,8 +20,6 @@ import { MAX_FILE_BYTES } from '@/lib/types'
 import type { ConvId } from '@/lib/types'
 
 const props = defineProps<{ disabled?: boolean }>()
-
-interface Queued { key: number; file: File; url: string | null }
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const sending = ref(false)
@@ -57,24 +56,45 @@ function unqueue(q: Queued) {
 async function send() {
   const ed = editor.value
   if (!ed || props.disabled || sending.value) return
+  const conv = chat.state.active
+  if (!conv) return
   const doc = fencesToCodeBlocks(ed.getJSON())
   const hasText = !isEmptyDoc(doc)
-  if (!hasText && !queue.value.length) return
+  const files = [...queue.value]
+  if (!hasText && !files.length) return
   sending.value = true
   let reply = replyTo.value
+  const here = () => chat.state.active === conv
+  // The user may have switched chats while a send was in flight; then clear that chat's saved state instead.
+  const clearReply = () => {
+    if (here()) replyTo.value = null
+    else {
+      const d = drafts.get(conv)
+      if (d?.reply) drafts.set(conv, { ...d, reply: null })
+    }
+  }
   try {
     if (hasText) {
-      await chat.sendText(doc, reply)
+      await chat.sendText(doc, reply, conv)
       reply = null
-      replyTo.value = null
-      ed.commands.clearContent(true)
-      empty.value = true
+      clearReply()
+      if (here()) {
+        ed.commands.clearContent(true)
+        empty.value = true
+      } else {
+        const d = drafts.get(conv)
+        if (d) drafts.set(conv, { ...d, doc: null })
+      }
     }
-    for (const q of [...queue.value]) {
-      await chat.sendFile(q.file, reply)
+    for (const q of files) {
+      await chat.sendFile(q.file, reply, conv)
       reply = null
-      replyTo.value = null
-      unqueue(q)
+      clearReply()
+      if (here()) unqueue(q)
+      else {
+        if (q.url) URL.revokeObjectURL(q.url)
+        queues.set(conv, (queues.get(conv) ?? []).filter((x) => x !== q))
+      }
     }
   } catch (e) {
     toast.error(errMsg(e))
@@ -156,6 +176,7 @@ const Keys = Extension.create({
         if (menu() && pickMention()) return true
         // In a code block Enter is a newline; Ctrl/Cmd+Enter or the button sends.
         if (this.editor.isActive('codeBlock')) return false
+        if (codeFenceShortcut(this.editor)) return true
         void send()
         return true
       },
@@ -215,32 +236,36 @@ const editor = useEditor({
 
 watch(() => props.disabled, (d) => editor.value?.setEditable(!d))
 
-// Per-conversation drafts: text, reply target and queued files.
-const queues = new Map<ConvId, Queued[]>()
+// Per-conversation drafts: text, reply target and queued files (restored on mount too).
+function restore(now: ConvId | null) {
+  const ed = editor.value
+  if (!ed) return
+  const d = now ? drafts.get(now) : undefined
+  ed.commands.setContent((d?.doc as object | null) ?? '', { emitUpdate: false })
+  replyTo.value = d?.reply ?? null
+  queue.value = (now && queues.get(now)) || []
+  empty.value = isEmptyDoc(ed.getJSON())
+  mention.value = null
+  if (now) ed.commands.focus('end')
+}
 watch(
   () => chat.state.active,
   (now, old) => {
     const ed = editor.value
     if (!ed) return
-    if (old && chat.state.account) {
+    if (old !== undefined && old && chat.state.account) {
       drafts.set(old, { doc: isEmptyDoc(ed.getJSON()) ? null : ed.getJSON(), reply: replyTo.value })
       queues.set(old, queue.value)
     }
-    const d = now ? drafts.get(now) : undefined
-    ed.commands.setContent((d?.doc as object | null) ?? '', { emitUpdate: false })
-    replyTo.value = d?.reply ?? null
-    queue.value = (now && queues.get(now)) || []
-    empty.value = isEmptyDoc(ed.getJSON())
-    mention.value = null
-    if (now) ed.commands.focus('end')
+    restore(now)
   },
 )
+// On mount (e.g. coming back from the Friends view) restore the draft once the editor exists.
+watch(editor, (ed) => ed && restore(chat.state.active), { immediate: true })
 
 // Signing out drops queued files too (state.ts clears the text drafts).
 watch(() => chat.state.account, (a) => {
   if (a) return
-  for (const q of [...queue.value, ...[...queues.values()].flat()]) if (q.url) URL.revokeObjectURL(q.url)
-  queues.clear()
   queue.value = []
   editor.value?.commands.clearContent(false)
   empty.value = true
@@ -253,9 +278,11 @@ watch(replyTo, (r) => {
 onBeforeUnmount(() => {
   const ed = editor.value
   const id = chat.state.active
-  if (ed && id && chat.state.account) drafts.set(id, { doc: isEmptyDoc(ed.getJSON()) ? null : ed.getJSON(), reply: replyTo.value })
+  if (ed && id && chat.state.account) {
+    drafts.set(id, { doc: isEmptyDoc(ed.getJSON()) ? null : ed.getJSON(), reply: replyTo.value })
+    queues.set(id, queue.value)
+  }
   ed?.destroy()
-  for (const q of [...queue.value, ...[...queues.values()].flat()]) if (q.url) URL.revokeObjectURL(q.url)
 })
 
 function onPick(e: Event) {
@@ -274,6 +301,11 @@ function openLink() {
   if (!ed) return
   linkUrl.value = (ed.getAttributes('link').href as string | undefined) ?? ''
   linkOpen.value = true
+}
+
+function closeLink() {
+  linkOpen.value = false
+  editor.value?.commands.focus()
 }
 
 function applyLink() {
@@ -370,9 +402,9 @@ const tools: Tool[] = [
       </div>
 
       <form v-if="linkOpen" class="flex items-center gap-1.5 border-b border-line px-2.5 py-2" @submit.prevent="applyLink">
-        <input v-model="linkUrl" class="field !h-9 !rounded-md !text-sm" placeholder="https://… (empty removes link)" autofocus>
+        <input v-model="linkUrl" class="field !h-9 !rounded-md !text-sm" aria-label="Link address" @keydown.esc.prevent.stop="closeLink" placeholder="https://… (empty removes link)" autofocus>
         <button class="btn btn-primary btn-icon btn-sm" type="submit" title="Apply" aria-label="Apply"><Check /></button>
-        <button class="btn btn-ghost btn-icon btn-sm" type="button" title="Cancel" aria-label="Cancel" @click="linkOpen = false"><X /></button>
+        <button class="btn btn-ghost btn-icon btn-sm" type="button" title="Cancel" aria-label="Cancel" @click="closeLink"><X /></button>
       </form>
 
       <div class="flex items-end gap-0.5 px-1">
@@ -405,7 +437,8 @@ const tools: Tool[] = [
 
     <!-- Fixed height so the typing line never shifts the layout -->
     <div class="flex h-5 items-center gap-1.5 px-1 pt-1 text-xs text-muted-foreground" aria-live="polite">
-      <span v-if="chat.state.status !== 'online'" class="truncate">Offline. Messages are sent when you're back online.</span>
+      <span v-if="chat.state.status === 'connecting'" class="truncate">Connecting…</span>
+      <span v-else-if="chat.state.status === 'offline'" class="truncate">Offline. Messages are sent when you're back online.</span>
       <template v-else-if="typingText">
         <span class="flex gap-0.5" aria-hidden="true">
           <i v-for="n in 3" :key="n" class="size-1 animate-bounce rounded-full bg-muted-foreground" :style="{ animationDelay: `${(n - 1) * 150}ms` }" />

@@ -18,6 +18,7 @@
     "notification:allow-register-listener",
     "notification:allow-remove-listener",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "clipboard-manager:allow-write-text"
   ]
 }

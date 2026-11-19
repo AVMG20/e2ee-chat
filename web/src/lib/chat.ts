@@ -1,4 +1,6 @@
 import * as engine from './engine'
+import { docToPlainText } from './plaintext'
+import type { ChatMessage } from './types'
 
 export type { ChatState, CropArea } from './engine'
 
@@ -73,12 +75,16 @@ export const chat = {
 
   /**
    * Opens a conversation: puts its newest messages in state.messages (more via loadOlder) and
-   * clears unread. With `focus` (a message id), also loads up to that message and sets state.highlight.
+   * clears unread. With `focus` (a message id), also loads up to that message and sets state.highlight;
+   * resolves false if that message isn't there (anymore).
    */
   open: engine.openConv,
-  /** Sends a Tiptap doc to the active conversation, optionally as a reply to a message. */
+  /**
+   * Sends a Tiptap doc to the active conversation (or `conv`, 3rd argument), optionally as a reply.
+   * Throws for a DM with someone who isn't a friend (anymore) or is blocked: it couldn't be delivered.
+   */
   sendText: engine.sendText,
-  /** Sends a file/image to the active conversation (optionally as a reply). Throws if larger than MAX_FILE_BYTES. */
+  /** Sends a file/image to the active conversation or `conv` (3rd argument), optionally as a reply. Throws if larger than MAX_FILE_BYTES. */
   sendFile: engine.sendFile,
   /** Replaces the text of one of my own text messages, for everyone. */
   editMessage: engine.editMessage,
@@ -94,10 +100,18 @@ export const chat = {
   onIncoming: engine.onIncoming,
   /** Call on composer input while there's text: tells the active conversation I'm typing (throttled). */
   typing: engine.typing,
+  /** Tell the engine whether the open chat is on screen (not the friends view or the chat list on a phone). */
+  setConvVisible: engine.setConvVisible,
+  /** Is this message (still) in the conversation on this device? */
+  hasMessage: engine.hasMessage,
+  /** Does this message mention me (@username or @display name) or reply to one of my messages? */
+  mentionsMe: engine.messageMentionsMe,
   /** Is the user looking at the app right now (visible and focused)? */
   isWatching: engine.isWatching,
   /** Desktop app: report window focus changes (a window hidden in the tray may still look visible to the page). */
   setWindowActive: engine.setWindowActive,
+  /** A message's text for copying: keeps line breaks and code as written (file name for files). */
+  copyText: (m: ChatMessage): string => (m.kind === 'text' ? docToPlainText(m.doc) : engine.previewText(m)),
   /** Plain-text preview of a message, as shown in the sidebar. */
   previewText: engine.previewText,
   /** Where the desktop app can be downloaded. */

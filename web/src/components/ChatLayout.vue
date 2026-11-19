@@ -42,6 +42,16 @@ watch(friendsOpen, (o) => {
     openFriends('add')
   }
 })
+// The chat only counts as read while it is actually on screen.
+const wide = window.matchMedia('(min-width: 768px)')
+const isWide = ref(wide.matches)
+const onWide = () => (isWide.value = wide.matches)
+wide.addEventListener('change', onWide)
+onBeforeUnmount(() => {
+  wide.removeEventListener('change', onWide)
+  chat.setConvVisible(false)
+})
+watch([view, showConv, isWide], () => chat.setConvVisible(view.value === 'chats' && (showConv.value || isWide.value)), { immediate: true })
 // Anything that opens a conversation brings the chat view back.
 watch(() => chat.state.active, (a) => {
   if (a) view.value = 'chats'

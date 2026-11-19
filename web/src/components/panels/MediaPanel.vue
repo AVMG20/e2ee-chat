@@ -19,11 +19,13 @@ const limit = ref(PAGE)
 const visibleImages = computed(() => images.value.slice(0, limit.value))
 const files = computed(() => items.value.filter((m) => !chat.isImage(m)))
 
-async function load() {
+async function load(keep = false) {
   const conv = chat.state.active
-  items.value = []
-  urls.value = {}
-  limit.value = PAGE
+  if (!keep) {
+    items.value = []
+    urls.value = {}
+    limit.value = PAGE
+  }
   if (!conv) return
   loading.value = true
   try {
@@ -53,8 +55,10 @@ function showMore() {
   void loadUrls()
 }
 
-onMounted(load)
-watch(() => chat.state.active, load)
+onMounted(() => load())
+watch(() => chat.state.active, () => load())
+// Files sent, received or deleted while the panel is open.
+watch(() => chat.state.messages.filter((m) => m.file).length, () => load(true))
 
 function view(m: ChatMessage) {
   viewerList.value = images.value

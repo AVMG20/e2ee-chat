@@ -43,6 +43,13 @@ function runSearch() {
 
 watch(query, runSearch)
 watch(() => chat.state.active, runSearch)
+// New or deleted messages change the results; deleted ones drop out right away.
+watch(() => chat.state.messages.length, () => {
+  const live = new Set(chat.state.messages.map((m) => m.id))
+  const cur = chat.state.active
+  hits.value = hits.value.filter((h) => h.conv !== cur || live.has(h.msg.id))
+  runSearch()
+})
 onMounted(() => input.value?.focus())
 onBeforeUnmount(() => {
   seq++

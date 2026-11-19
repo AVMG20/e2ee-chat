@@ -180,9 +180,9 @@ async function select(c: Conversation) {
     <!-- user panel -->
     <div class="flex h-[3.25rem] shrink-0 items-center gap-2 bg-rail/60 px-2" style="--dot-ring: color-mix(in srgb, var(--rail) 60%, var(--sidebar))">
       <button class="flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 text-left outline-none transition-colors hover:bg-hover focus-visible:shadow-[var(--glow)]" title="Account settings" aria-label="Account settings" @click="accountOpen = true">
-        <UserAvatar :name="chat.state.account?.username ?? '?'" :id="chat.state.account?.id" :src="chat.state.account?.avatar" :size="32" :online="chat.state.status === 'online'" />
+        <UserAvatar :name="chat.state.account?.displayName ?? '?'" :id="chat.state.account?.id" :src="chat.state.account?.avatar" :size="32" :online="chat.state.status === 'online'" />
         <span class="min-w-0 flex-1 leading-tight">
-          <span class="block truncate text-[13px] font-semibold">{{ chat.state.account?.username }}</span>
+          <span class="block truncate text-[13px] font-semibold">{{ chat.state.account?.displayName }}</span>
           <span class="block truncate font-mono text-[11px] text-muted-foreground">{{ copied ? 'ID copied' : myId }}</span>
         </span>
       </button>

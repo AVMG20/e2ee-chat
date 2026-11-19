@@ -26,14 +26,22 @@ let unreadTimer: ReturnType<typeof setTimeout> | undefined
 const GROUP_MS = 5 * 60 * 1000
 
 let lastTop = 0
+// Only the user scrolling up lets go of the bottom. Content changing size (images loading, rows
+// re-rendering) also moves the position, and the browser may pull it up when the list briefly shrinks.
+let userAt = 0
+let dragging = false
+const markUser = () => (userAt = performance.now())
+function onPointerDown() {
+  dragging = true // e.g. dragging the scrollbar
+  window.addEventListener('pointerup', () => (dragging = false), { once: true })
+}
 
 function onScroll() {
   const el = scroller.value
   if (!el) return
   const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120
-  // Only moving up (the user scrolling) lets go of the bottom. Content growing below (images
-  // loading) also changes the distance, and its scroll event can arrive after the growth.
-  if (el.scrollTop < lastTop - 1) stick = near
+  const byUser = dragging || performance.now() - userAt < 600
+  if (byUser && el.scrollTop < lastTop - 1) stick = near
   else if (near) stick = true
   lastTop = el.scrollTop
   atBottom.value = stick || near
@@ -122,8 +130,10 @@ async function jump(id: string) {
   if (reveal(id)) return
   const conv = chat.state.active
   if (!conv) return
+  const gone = () => toast.error("The original message isn't available anymore")
   try {
-    await chat.open(conv, id)
+    if (!(await chat.hasMessage(conv, id))) return gone()
+    if (!(await chat.open(conv, id))) gone()
   } catch (e) {
     toast.error(errMsg(e))
   }
@@ -252,7 +262,8 @@ watch(() => chat.state.active, () => {
 <template>
   <div class="relative min-h-0 flex-1">
     <TooltipProvider :delay-duration="200">
-      <div ref="scroller" class="h-full overflow-y-auto pt-4 pb-4 [overflow-anchor:none]" @scroll="onScroll">
+      <div ref="scroller" class="h-full overflow-y-auto pt-4 pb-4 [overflow-anchor:none]" @scroll="onScroll"
+        @wheel.passive="markUser" @touchmove.passive="markUser" @keydown="markUser" @pointerdown="onPointerDown">
         <div ref="content">
           <div v-if="loadingOlder" class="flex items-center justify-center gap-2 py-2 text-xs text-muted-foreground" role="status">
             <Loader2 class="size-3.5 animate-spin" />Loading…

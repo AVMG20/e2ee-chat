@@ -1,5 +1,6 @@
 use tauri::{
-    AppHandle, Manager, Url, WindowEvent,
+    AppHandle, Manager, Url, WebviewWindowBuilder, WindowEvent,
+    webview::DownloadEvent,
     menu::{Menu, MenuItem},
     plugin::Builder as PluginBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -50,10 +51,23 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(nav_guard)
         .setup(|app| {
+            // The window is built here (not from the config) so downloads get a handler: without
+            // one, macOS cancels every download (files, images, backups). They go to Downloads.
+            if let Some(config) = app.config().app.windows.first() {
+                WebviewWindowBuilder::from_config(app.handle(), config)?
+                    .on_download(|webview, event| {
+                        if let DownloadEvent::Finished { path: Some(path), success: true, .. } = event {
+                            let _ = webview.opener().reveal_item_in_dir(&path);
+                        }
+                        true
+                    })
+                    .build()?;
+            }
             let open = MenuItem::with_id(app, "open", "Open E2EE Chat", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;

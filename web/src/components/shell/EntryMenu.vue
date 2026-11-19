@@ -54,7 +54,7 @@ async function open() {
         <ContextMenuItem variant="destructive" @select="pendingAction = { kind: 'block', id }"><Ban />Block</ContextMenuItem>
       </template>
       <template v-else>
-        <ContextMenuItem @select="addMembersGroup = id"><UserPlus />Add members</ContextMenuItem>
+        <ContextMenuItem v-if="canAdmin" @select="addMembersGroup = id"><UserPlus />Add members</ContextMenuItem>
         <ContextMenuItem v-if="canAdmin" @select="renameGroupId = id"><Pencil />Rename group</ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem variant="destructive" @select="pendingAction = { kind: 'leave', id }"><LogOut />Leave group</ContextMenuItem>

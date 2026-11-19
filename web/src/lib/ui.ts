@@ -2,6 +2,7 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
 import { errMsg, formatClock } from '@/lib/format'
+import { addMembersGroup, friendsTab, pendingAction, renameGroupId, showConv, view } from '@/lib/nav'
 import type { Contact, Conversation, ConvId } from '@/lib/types'
 
 /** Legacy trigger: setting this to true opens the Friends view (ChatLayout resets it). */
@@ -14,6 +15,42 @@ export const sidePanel = ref<SidePanel | null>(null)
 /** User whose profile the Info panel shows (instead of the chat's own info). Cleared when the chat changes. */
 export const panelUser = ref<string | null>(null)
 watch(() => chat.state.active, () => (panelUser.value = null))
+
+// A different account (or none) must not inherit the previous one's open panels and dialogs.
+watch(() => chat.state.account?.id, (id, prev) => {
+  if (id === prev) return
+  sidePanel.value = null
+  panelUser.value = null
+  starredScope.value = 'chat'
+  view.value = 'chats'
+  friendsTab.value = 'online'
+  showConv.value = false
+  pendingAction.value = null
+  addMembersGroup.value = null
+  renameGroupId.value = null
+  paletteOpen.value = false
+  accountOpen.value = false
+})
+
+export type FriendState = 'friend' | 'outgoing' | 'incoming' | 'blocked' | 'none'
+
+/** Where a user stands with me: friend, request pending either way, blocked, or nothing. */
+export function friendState(id: string): FriendState {
+  const s = chat.state
+  if (s.blocked.some((b) => b.id === id)) return 'blocked'
+  if (s.contacts[id]?.friend) return 'friend'
+  if (s.requests.incoming.some((r) => r.id === id)) return 'incoming'
+  if (s.requests.outgoing.some((r) => r.id === id)) return 'outgoing'
+  return 'none'
+}
+
+/** Sends a friend request and toasts the right outcome (it auto-accepts if they had already asked). Throws on failure. */
+export async function sendFriendRequestToast(id: string, name?: string) {
+  const wasIncoming = friendState(id) === 'incoming'
+  await chat.sendFriendRequest(id)
+  const n = name ?? chat.displayName(id)
+  toast.success(wasIncoming || chat.state.contacts[id]?.friend ? `You're now friends with ${n}` : `Friend request sent to ${n}`)
+}
 
 /** Click on a person: me opens account settings, anyone else opens their profile in the Info panel. */
 export function openUser(id: string) {
@@ -76,23 +113,47 @@ export function muteTitle(c: Conversation): string {
   return c.mentionsOnly ? 'Only notifies for mentions' : ''
 }
 
-export async function copyText(text: string, what = 'Copied'): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text)
-  } catch {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
+/** Copies text; resolves true if it reached the clipboard. Toasts the result. */
+export async function copyText(text: string, what = 'Copied'): Promise<boolean> {
+  const ok = await writeClipboard(text)
+  if (ok) toast.success(what)
+  else toast.error("Couldn't copy to the clipboard")
+  return ok
+}
+
+async function writeClipboard(text: string): Promise<boolean> {
+  // Desktop: the native clipboard (the webview's own API isn't always available there).
+  if ('__TAURI_INTERNALS__' in globalThis) {
     try {
-      document.execCommand('copy')
-    } finally {
-      ta.remove()
+      const { writeText } = await import('@tauri-apps/plugin-clipboard-manager')
+      await writeText(text)
+      return true
+    } catch {
+      /* fall through */
     }
   }
-  toast.success(what)
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    /* fall through */
+  }
+  // Last resort: answer a copy event ourselves (works even while a menu or dialog holds focus).
+  let done = false
+  const onCopy = (e: ClipboardEvent) => {
+    e.clipboardData?.setData('text/plain', text)
+    e.preventDefault()
+    done = !!e.clipboardData
+  }
+  document.addEventListener('copy', onCopy, { capture: true, once: true })
+  try {
+    document.execCommand('copy')
+  } catch {
+    /* unsupported */
+  } finally {
+    document.removeEventListener('copy', onCopy, { capture: true })
+  }
+  return done
 }
 
 /** Copy with a short-lived `copied` flag, for swapping a copy icon to a check. */
@@ -100,7 +161,7 @@ export function useCopy(ms = 1500) {
   const copied = ref(false)
   let timer: ReturnType<typeof setTimeout> | undefined
   async function copy(text: string, what = 'ID copied') {
-    await copyText(text, what)
+    if (!(await copyText(text, what))) return
     copied.value = true
     clearTimeout(timer)
     timer = setTimeout(() => (copied.value = false), ms)

@@ -169,7 +169,7 @@ async function choose(it: Item | undefined) {
             @mousemove="index = n" @click="choose(it)"
           >
             <div v-if="it.group" class="flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><Hash class="size-4" /></div>
-            <UserAvatar v-else :name="it.title" :id="it.userId" :size="32" :online="chat.state.contacts[it.userId!]?.online" />
+            <UserAvatar v-else :name="it.title" :id="it.userId" :src="it.userId ? chat.state.contacts[it.userId]?.avatar : null" :size="32" :online="chat.state.contacts[it.userId!]?.online" />
             <span class="min-w-0 flex-1 truncate text-[15px] font-medium">{{ it.title }}</span>
             <span v-if="it.sub" class="text-xs text-muted-foreground">{{ it.sub }}</span>
             <span v-if="it.unread > 0" class="unread shrink-0">{{ it.unread > 99 ? '99+' : it.unread }}</span>

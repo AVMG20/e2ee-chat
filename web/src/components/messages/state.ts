@@ -36,10 +36,9 @@ export async function deleteMsg(msg: ChatMessage) {
 }
 
 export function startEditLast(): boolean {
-  const me = myId()
   for (let i = chat.state.messages.length - 1; i >= 0; i--) {
     const m = chat.state.messages[i]!
-    if (m.from === me && m.kind === 'text' && m.status !== 'failed') {
+    if (canEditMsg(m)) {
       editingId.value = m.id
       return true
     }
@@ -50,9 +49,15 @@ export function startEditLast(): boolean {
 export type Draft = { doc: unknown; reply: ChatMessage | null }
 /** In-memory only (never persisted): unsent text and reply target per conversation. */
 export const drafts = shallowReactive(new Map<ConvId, Draft>())
+/** A file waiting in the composer to be sent. */
+export interface Queued { key: number; file: File; url: string | null }
+/** Queued files per conversation; kept here so they survive the composer unmounting (Friends view). */
+export const queues = new Map<ConvId, Queued[]>()
 watch(() => chat.state.account, (a) => {
   if (!a) {
     drafts.clear()
+    for (const q of [...queues.values()].flat()) if (q.url) URL.revokeObjectURL(q.url)
+    queues.clear()
     replyTo.value = null
   }
 })

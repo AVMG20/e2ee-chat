@@ -21,7 +21,7 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { addMembersGroup, renameGroupId } from '@/lib/nav'
-import { MUTE_OPTIONS, copyText, friendsOpen, muteFor, setPrefs, sidePanel, starredScope, trustNewKey, type SidePanel as PanelName } from '@/lib/ui'
+import { MUTE_OPTIONS, copyText, friendsOpen, muteFor, panelUser, setPrefs, sidePanel, starredScope, trustNewKey, type SidePanel as PanelName } from '@/lib/ui'
 
 defineEmits<{ back: [] }>()
 
@@ -34,6 +34,34 @@ const myId = computed(() => chat.formatId(chat.state.account?.id ?? ''))
 const group = computed(() =>
   conv.value?.kind === 'group' ? chat.state.groups[conv.value.id.slice(2)] ?? null : null,
 )
+
+const notFriend = computed(() => !!dmId.value && !contact.value?.friend)
+const blocked = computed(() => !!dmId.value && chat.state.blocked.some((b) => b.id === dmId.value))
+const outgoing = computed(() => !!dmId.value && chat.state.requests.outgoing.some((r) => r.id === dmId.value))
+const incoming = computed(() => !!dmId.value && chat.state.requests.incoming.some((r) => r.id === dmId.value))
+const peerName = computed(() => conv.value?.title ?? '')
+async function bannerAction(fn: () => Promise<unknown>, ok: string) {
+  busy.value = true
+  try {
+    await fn()
+    toast.success(ok)
+  } catch (e) {
+    toast.error(errMsg(e))
+  } finally {
+    busy.value = false
+  }
+}
+const addFriend = () => bannerAction(() => chat.sendFriendRequest(dmId.value!), 'Friend request sent')
+const acceptFriend = () => bannerAction(() => chat.acceptFriend(dmId.value!), 'Friend added')
+const unblock = () => bannerAction(() => chat.unblockUser(dmId.value!), 'Unblocked')
+function showMembers() {
+  panelUser.value = null
+  sidePanel.value = 'info'
+}
+function toggleInfo() {
+  if (sidePanel.value === 'info') sidePanel.value = null
+  else showMembers()
+}
 
 const isAdmin = computed(() => (group.value ? chat.isGroupAdmin(group.value.id) : false))
 
@@ -68,7 +96,7 @@ async function trust() {
 }
 
 const panelTitles: Record<PanelName, string> = { info: 'Members', search: 'Search', media: 'Media and files', starred: 'Starred messages' }
-const panelTitle = computed(() => (sidePanel.value === 'info' && contact.value ? 'User info' : sidePanel.value ? panelTitles[sidePanel.value] : ''))
+const panelTitle = computed(() => (sidePanel.value === 'info' && (contact.value || panelUser.value) ? 'User info' : sidePanel.value ? panelTitles[sidePanel.value] : ''))
 /** The panel shows beside an open chat; the starred panel (from the rail) also works without one. */
 const panelShown = computed(() => !!sidePanel.value && (!!conv.value || sidePanel.value === 'starred'))
 const togglePanel = (p: PanelName) => (sidePanel.value = sidePanel.value === p ? null : p)
@@ -134,14 +162,14 @@ async function leave() {
           <h1 class="truncate text-[15px] font-bold">{{ conv.title }}</h1>
           <button v-if="group && isAdmin" class="self-center text-muted-foreground hover:text-foreground" title="Rename group" aria-label="Rename group" @click="renameGroupId = group.id"><Pencil class="size-3.5" /></button>
           <ShieldCheck v-if="contact?.verified" class="size-4 shrink-0 self-center text-success" title="Verified" />
-          <span v-if="contact" class="hidden truncate text-xs text-muted-foreground sm:inline">{{ contact.online ? 'Online' : 'Offline' }}</span>
-          <button v-else-if="group" class="truncate text-xs text-muted-foreground hover:text-foreground hover:underline" @click="sidePanel = 'info'">{{ group.members.length }} members</button>
+          <span v-if="contact?.friend" class="hidden truncate text-xs text-muted-foreground sm:inline">{{ contact.online ? 'Online' : 'Offline' }}</span>
+          <button v-else-if="group" class="truncate text-xs text-muted-foreground hover:text-foreground hover:underline" @click="showMembers">{{ group.members.length }} members</button>
         </div>
 
         <button class="btn btn-ghost btn-icon btn-sm" :class="sidePanel === 'search' && 'bg-soft text-foreground'" :aria-pressed="sidePanel === 'search'" title="Search messages" aria-label="Search messages" @click="togglePanel('search')"><Search /></button>
         <button
           class="btn btn-ghost btn-icon btn-sm" :class="sidePanel === 'info' && 'bg-soft text-foreground'" :aria-pressed="sidePanel === 'info'"
-          :title="group ? 'Members' : 'User info'" :aria-label="group ? 'Members' : 'User info'" @click="togglePanel('info')"
+          :title="group ? 'Members' : 'User info'" :aria-label="group ? 'Members' : 'User info'" @click="toggleInfo"
         ><Users v-if="group" /><User v-else /></button>
 
         <DropdownMenu>
@@ -150,8 +178,8 @@ async function leave() {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" class="w-56">
             <template v-if="group">
-              <DropdownMenuItem @select="sidePanel = 'info'"><Users />Members</DropdownMenuItem>
-              <DropdownMenuItem @select="addMembersGroup = group.id"><UserPlus />Add members</DropdownMenuItem>
+              <DropdownMenuItem @select="showMembers"><Users />Members</DropdownMenuItem>
+              <DropdownMenuItem v-if="isAdmin" @select="addMembersGroup = group.id"><UserPlus />Add members</DropdownMenuItem>
               <DropdownMenuItem v-if="isAdmin" @select="renameGroupId = group.id"><Pencil />Rename group</DropdownMenuItem>
               <DropdownMenuSeparator />
             </template>
@@ -194,9 +222,24 @@ async function leave() {
         </div>
       </div>
 
+      <div
+        v-if="blocked || notFriend"
+        class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-line bg-soft px-3 py-2 text-sm sm:px-4"
+        role="status"
+      >
+        <p class="min-w-0 flex-1 leading-snug">
+          <template v-if="blocked">You blocked {{ peerName }}.</template>
+          <template v-else>You're not friends with {{ peerName }} anymore. Messages can't be delivered.</template>
+        </p>
+        <button v-if="blocked" class="btn btn-soft btn-sm" :disabled="busy" title="Unblock" aria-label="Unblock" @click="unblock">Unblock</button>
+        <button v-else-if="incoming" class="btn btn-primary btn-sm" :disabled="busy" title="Accept friend request" aria-label="Accept friend request" @click="acceptFriend">Accept</button>
+        <button v-else-if="outgoing" class="btn btn-soft btn-sm" disabled>Request sent</button>
+        <button v-else class="btn btn-primary btn-sm" :disabled="busy" title="Add friend" aria-label="Add friend" @click="addFriend">Add friend</button>
+      </div>
+
       <MessageList />
 
-      <div class="shrink-0 px-3 pb-1 sm:px-4 sm:pb-2"><Composer ref="composer" :disabled="!!contact?.keyChanged" /></div>
+      <div class="shrink-0 px-3 pb-1 sm:px-4 sm:pb-2"><Composer ref="composer" :disabled="!!contact?.keyChanged || notFriend || blocked" /></div>
 
       <Transition
         enter-active-class="transition-opacity duration-150" enter-from-class="opacity-0"

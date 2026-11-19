@@ -6,7 +6,6 @@ import EmojiGrid from '@/components/messages/EmojiGrid.vue'
 import { QUICK_EMOJI } from '@/components/messages/emoji'
 import { canDeleteMsg, canEditMsg, canForward, deleteTarget, editingId, forwardMsg, reactTo, replyTo, retry, sheetMsg, toggleStar } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
-import { docToText } from '@/lib/render'
 import { copyText } from '@/lib/ui'
 
 /** Bottom sheet with message actions, opened by long-press on touch devices. */
@@ -20,7 +19,7 @@ const open = computed({
 const more = ref(false)
 watch(open, (o) => o && (more.value = false))
 
-const text = computed(() => (msg.value?.kind === 'text' ? docToText(msg.value.doc) : ''))
+const canCopy = computed(() => msg.value?.kind === 'text')
 
 /** Runs an action on the open message, then closes the sheet. */
 function run(fn: (m: NonNullable<typeof msg.value>) => void) {
@@ -45,7 +44,7 @@ const row = 'flex h-12 w-full items-center gap-3 rounded-md px-3 text-left text-
 
       <div v-if="msg && more" class="mx-auto w-full max-w-sm"><EmojiGrid @pick="(e) => run((m) => reactTo(m, e))" /></div>
       <template v-else-if="msg">
-        <div v-if="msg.status !== 'failed'" class="flex items-center justify-between gap-0.5 px-1 pb-1">
+        <div v-if="msg.status !== 'failed' && msg.status !== 'sending'" class="flex items-center justify-between gap-0.5 px-1 pb-1">
           <button
             v-for="e in QUICK_EMOJI" :key="e" type="button" :aria-label="`React ${e}`"
             class="flex size-10 items-center justify-center rounded-full text-2xl outline-none hover:bg-hover active:scale-90"
@@ -56,12 +55,12 @@ const row = 'flex h-12 w-full items-center gap-3 rounded-md px-3 text-left text-
           <button type="button" class="btn btn-soft btn-icon !size-10 !rounded-full" aria-label="More emoji" title="More emoji" @click="more = true"><Plus /></button>
         </div>
         <button v-if="msg.status === 'failed'" type="button" :class="row" @click="run(retry)"><RotateCw />Retry</button>
-        <template v-else>
+        <template v-else-if="msg.status !== 'sending'">
           <button type="button" :class="row" @click="run((m) => (replyTo = m))"><CornerUpLeft />Reply</button>
           <button v-if="canForward(msg)" type="button" :class="row" @click="run((m) => (forwardMsg = m))"><Forward />Forward</button>
           <button type="button" :class="row" @click="run(toggleStar)"><Star :class="chat.isStarred(msg) && 'fill-current'" />{{ chat.isStarred(msg) ? 'Unstar' : 'Star' }}</button>
         </template>
-        <button v-if="text" type="button" :class="row" @click="run(() => copyText(text, 'Copied'))"><Copy />Copy text</button>
+        <button v-if="canCopy" type="button" :class="row" @click="run((m) => copyText(chat.copyText(m), 'Copied'))"><Copy />Copy text</button>
         <button v-if="canEditMsg(msg)" type="button" :class="row" @click="run((m) => (editingId = m.id))"><Pencil />Edit message</button>
         <button
           v-if="canDeleteMsg(msg)" type="button" :class="[row, 'text-destructive [&_svg]:!text-destructive']"

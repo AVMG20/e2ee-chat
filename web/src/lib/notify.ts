@@ -81,9 +81,29 @@ export function setSound(on: boolean) {
 }
 
 let audio: AudioContext | undefined
+function audioCtx(): AudioContext {
+  audio ??= new AudioContext()
+  if (audio.state === 'suspended') void audio.resume().catch(() => {})
+  return audio
+}
+// WebKit keeps a context created outside a user gesture suspended: unlock it on the first interaction.
+if (typeof document !== 'undefined') {
+  const unlock = () => {
+    try {
+      audioCtx()
+    } catch {
+      /* audio unavailable */
+    }
+    document.removeEventListener('pointerdown', unlock, true)
+    document.removeEventListener('keydown', unlock, true)
+  }
+  document.addEventListener('pointerdown', unlock, { capture: true })
+  document.addEventListener('keydown', unlock, { capture: true })
+}
+
 function blip() {
   try {
-    audio ??= new AudioContext()
+    const audio = audioCtx()
     const t = audio.currentTime
     const osc = audio.createOscillator()
     const gain = audio.createGain()

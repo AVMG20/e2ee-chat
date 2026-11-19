@@ -9,6 +9,7 @@ import { editorExtensions } from '@/lib/editor'
 import { errMsg } from '@/lib/format'
 import { isEmptyDoc } from '@/lib/render'
 import type { ChatMessage } from '@/lib/types'
+import { codeFenceShortcut } from './codefence'
 import { editingId } from './state'
 
 const props = defineProps<{ msg: ChatMessage }>()
@@ -43,7 +44,12 @@ const Keys = Extension.create({
   priority: 1000,
   addKeyboardShortcuts() {
     return {
-      Enter: () => (this.editor.isActive('codeBlock') ? false : (void save(), true)),
+      Enter: () => {
+        if (this.editor.isActive('codeBlock')) return false
+        if (codeFenceShortcut(this.editor)) return true
+        void save()
+        return true
+      },
       'Mod-Enter': () => (void save(), true),
       Escape: () => (cancel(), true),
     }

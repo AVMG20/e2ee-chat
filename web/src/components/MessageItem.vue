@@ -15,7 +15,7 @@ import { useLongPress } from '@/components/messages/longpress'
 import { canDeleteMsg, canEditMsg, canForward, deleteMsg, deleteTarget, editingId, flashId, forwardMsg, myId, reactTo, replyTo, retry, toggleStar } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
 import { formatClock, hueOf } from '@/lib/format'
-import { docToText, renderMessageHtml } from '@/lib/render'
+import { renderMessageHtml } from '@/lib/render'
 import type { ChatMessage } from '@/lib/types'
 import { copyText, openUser } from '@/lib/ui'
 
@@ -32,7 +32,7 @@ const emit = defineEmits<{ jump: [id: string] }>()
 const avatarOf = (id: string) =>
   id === chat.state.account?.id ? chat.state.account.avatar : chat.state.contacts[id]?.avatar ?? null
 const mine = computed(() => props.msg.from === myId())
-const name = computed(() => (mine.value ? chat.state.account!.username : chat.displayName(props.msg.from)))
+const name = computed(() => (mine.value ? chat.state.account!.displayName : chat.displayName(props.msg.from)))
 const replyName = computed(() => (props.msg.reply ? chat.displayName(props.msg.reply.from) : ''))
 const time = computed(() => formatClock(props.msg.ts))
 const failed = computed(() => props.msg.status === 'failed')
@@ -41,7 +41,8 @@ const starred = computed(() => chat.isStarred(props.msg))
 const editing = computed(() => editingId.value === props.msg.id)
 const canEdit = computed(() => canEditMsg(props.msg))
 const canDelete = computed(() => canDeleteMsg(props.msg))
-const text = computed(() => (props.msg.kind === 'text' ? docToText(props.msg.doc) : ''))
+const canCopy = computed(() => props.msg.kind === 'text')
+const copyMsg = () => copyText(chat.copyText(props.msg), 'Copied')
 
 const html = computed(() => {
   if (props.msg.kind !== 'text') return ''
@@ -54,10 +55,7 @@ const html = computed(() => {
   return h
 })
 
-const mentionsMe = computed(() => {
-  const u = chat.state.account?.username
-  return !mine.value && !!u && text.value.toLowerCase().includes(`@${u.toLowerCase()}`)
-})
+const mentionsMe = computed(() => !mine.value && chat.mentionsMe(props.msg))
 
 const pickerOpen = ref(false)
 
@@ -94,7 +92,26 @@ function onBodyClick(e: MouseEvent) {
   setTimeout(() => (btn.innerHTML = ICON_COPY), 1500)
 }
 
-const press = useLongPress(() => props.msg, () => (settled.value || failed.value) && !editing.value)
+const press = useLongPress(() => props.msg, () => !editing.value)
+
+// WebKit clears a text selection on right-click; keep it and let the native Copy menu appear instead.
+function onContextmenuCapture(e: MouseEvent) {
+  press.bind.onContextmenuCapture(e)
+  if (e.cancelBubble) return
+  const sel = window.getSelection()
+  const row = e.currentTarget as HTMLElement | null
+  if (row && sel && !sel.isCollapsed && sel.rangeCount && sel.containsNode(row, true)) e.stopPropagation()
+}
+
+function reactFromToolbar(emoji: string) {
+  void reactTo(props.msg, emoji)
+  // The picker doesn't restore focus (it would land on the toolbar); put it back in the composer.
+  setTimeout(() => {
+    const active = document.activeElement
+    if ((active && active !== document.body) || !window.getSelection()?.isCollapsed) return
+    document.querySelector<HTMLElement>('.composer-editor')?.focus()
+  }, 50)
+}
 
 function askDelete(e?: MouseEvent) {
   if (e?.shiftKey) void deleteMsg(props.msg)
@@ -111,6 +128,7 @@ function askDelete(e?: MouseEvent) {
         :data-mid="msg.id"
         class="msg-row group relative px-4 py-0.5 pr-6 transition-colors duration-500 [-webkit-touch-callout:none]"
         v-bind="press.bind"
+        @contextmenu.capture="onContextmenuCapture"
         :class="[
           press.pressing.value && 'select-none',
           head ? 'mt-4' : '',
@@ -169,7 +187,7 @@ function askDelete(e?: MouseEvent) {
           class="absolute -top-3.5 right-4 z-10 flex items-center rounded-md bg-popover p-0.5 opacity-0 shadow-[var(--shadow-sm),inset_0_0_0_1px_var(--line)] transition-opacity group-hover:opacity-100 focus-within:opacity-100"
           :class="pickerOpen && '!opacity-100'"
         >
-          <EmojiPicker v-model:open="pickerOpen" quick @pick="(e) => reactTo(msg, e)">
+          <EmojiPicker v-model:open="pickerOpen" quick @pick="reactFromToolbar">
             <button type="button" class="btn btn-ghost btn-icon btn-sm" title="Add reaction" aria-label="Add reaction"><SmilePlus /></button>
           </EmojiPicker>
           <button type="button" class="btn btn-ghost btn-icon btn-sm" title="Reply" aria-label="Reply" @click="replyTo = msg"><CornerUpLeft /></button>
@@ -188,9 +206,13 @@ function askDelete(e?: MouseEvent) {
 
     <ContextMenuContent v-if="failed" class="w-48">
       <ContextMenuItem @select="retry(msg)"><RotateCw />Retry</ContextMenuItem>
-      <ContextMenuItem v-if="text" @select="copyText(text, 'Copied')"><Copy />Copy text</ContextMenuItem>
+      <ContextMenuItem v-if="canCopy" @select="copyMsg"><Copy />Copy text</ContextMenuItem>
       <ContextMenuSeparator />
       <ContextMenuItem variant="destructive" @select="askDelete()"><Trash2 />Delete message</ContextMenuItem>
+    </ContextMenuContent>
+    <ContextMenuContent v-else-if="msg.status === 'sending'" class="w-48">
+      <ContextMenuItem v-if="canCopy" @select="copyMsg"><Copy />Copy text</ContextMenuItem>
+      <ContextMenuItem v-if="canDelete" variant="destructive" @select="askDelete()"><Trash2 />Delete message</ContextMenuItem>
     </ContextMenuContent>
     <ContextMenuContent v-else-if="settled" class="w-48">
       <ContextMenuSub>
@@ -204,7 +226,7 @@ function askDelete(e?: MouseEvent) {
       <ContextMenuItem @select="replyTo = msg"><CornerUpLeft />Reply</ContextMenuItem>
       <ContextMenuItem v-if="canForward(msg)" @select="forwardMsg = msg"><Forward />Forward</ContextMenuItem>
       <ContextMenuItem @select="toggleStar(msg)"><Star :class="starred && 'fill-current'" />{{ starred ? 'Unstar' : 'Star' }}</ContextMenuItem>
-      <ContextMenuItem v-if="text" @select="copyText(text, 'Copied')"><Copy />Copy text</ContextMenuItem>
+      <ContextMenuItem v-if="canCopy" @select="copyMsg"><Copy />Copy text</ContextMenuItem>
       <template v-if="canEdit || canDelete">
         <ContextMenuSeparator />
         <ContextMenuItem v-if="canEdit" @select="editingId = msg.id"><Pencil />Edit message</ContextMenuItem>

@@ -52,7 +52,7 @@ async function submit() {
           <DialogDescription>New members will be able to read messages sent after they join.</DialogDescription>
         </DialogHeader>
         <div class="well max-h-60 space-y-0.5 overflow-y-auto rounded-lg p-1.5">
-          <p v-if="!candidates.length" class="p-2 text-xs text-muted-foreground">All your friends are already in this group.</p>
+          <p v-if="!candidates.length" class="p-2 text-xs text-muted-foreground">{{ friendList().length ? 'All your friends are already in this group.' : 'Add friends first to invite them.' }}</p>
           <label v-for="f in candidates" :key="f.id" class="flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-hover">
             <UserAvatar :name="f.name" :id="f.id" :src="f.avatar" :size="28" />
             <span class="flex-1 font-medium">{{ f.name }}</span>

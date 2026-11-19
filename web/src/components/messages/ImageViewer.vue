@@ -7,7 +7,7 @@ import { chat } from '@/lib/chat'
 import { formatSize } from '@/lib/format'
 
 /** Full-screen lightbox over the images currently loaded in the conversation. */
-const images = computed(() => (viewerList.value ?? chat.state.messages).filter((m) => m.kind === 'file' && m.file?.mime.startsWith('image/')))
+const images = computed(() => (viewerList.value ?? chat.state.messages).filter((m) => m.kind === 'file' && chat.isImage(m)))
 const idx = computed(() => images.value.findIndex((m) => m.id === viewerId.value))
 const cur = computed(() => images.value[idx.value] ?? null)
 const open = computed({

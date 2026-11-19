@@ -1,6 +1,7 @@
 import type { JSONContent } from '@tiptap/core'
 import { generateHTML } from '@tiptap/html'
 import DOMPurify from 'dompurify'
+import { find } from 'linkifyjs'
 import { highlightCode, languageName } from './code/highlight'
 import { editorExtensions } from './editor'
 
@@ -26,6 +27,35 @@ const LANG_CLASS = /^language-([\w+#-]{1,20})$/
 DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
   if (data.attrName === 'class') data.keepAttr = node.tagName === 'CODE' && LANG_CLASS.test(data.attrValue)
 })
+
+/** Links bare http(s) URLs in plain text (Tiptap only autolinks after a following space, and Enter sends). */
+function linkifyBareUrls(frag: DocumentFragment) {
+  const walker = document.createTreeWalker(frag, NodeFilter.SHOW_TEXT)
+  const texts: Text[] = []
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (!n.parentElement?.closest('a, code, pre')) texts.push(n as Text)
+  }
+  for (const t of texts) {
+    const text = t.data
+    if (!/https?:\/\//i.test(text)) continue
+    const links = find(text, 'url').filter((l) => /^https?:\/\//i.test(l.href) && /^https?:\/\//i.test(l.value))
+    if (!links.length) continue
+    const out = document.createDocumentFragment()
+    let at = 0
+    for (const l of links) {
+      if (l.start > at) out.append(text.slice(at, l.start))
+      const a = document.createElement('a')
+      a.setAttribute('href', l.href)
+      a.textContent = l.value
+      if (!isDesktop) a.setAttribute('target', '_blank')
+      a.setAttribute('rel', 'noopener noreferrer nofollow')
+      out.append(a)
+      at = l.end
+    }
+    if (at < text.length) out.append(text.slice(at))
+    t.replaceWith(out)
+  }
+}
 
 /** Nesting/size limits for docs received from others (keeps rendering cheap and non-recursive-bomb). */
 export const MAX_DOC_DEPTH = 32
@@ -64,6 +94,7 @@ export function renderMessageHtml(doc: JSONContent | undefined): string {
     ALLOWED_URI_REGEXP: /^(?:https?:|mailto:)/i,
     RETURN_DOM_FRAGMENT: true,
   })
+  linkifyBareUrls(frag)
   // Syntax highlighting: highlight.js escapes the code text and only adds <span class="hljs-…">.
   for (const pre of frag.querySelectorAll('pre')) {
     pre.classList.add('msg-code')
@@ -105,3 +136,4 @@ export function docToText(doc: JSONContent | undefined): string {
 export function isEmptyDoc(doc: JSONContent | undefined): boolean {
   return docToText(doc) === ''
 }
+

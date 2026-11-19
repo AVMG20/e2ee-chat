@@ -14,7 +14,7 @@ function openStarred() {
   sidePanel.value = 'starred'
 }
 const incoming = computed(() => chat.state.requests.incoming.length)
-const unread = computed(() => chat.state.conversations.reduce((n, c) => n + c.unread, 0))
+const unread = computed(() => chat.state.conversations.reduce((n, c) => (c.muted ? n : n + c.unread), 0))
 </script>
 
 <template>

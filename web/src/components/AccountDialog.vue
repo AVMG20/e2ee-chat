@@ -29,13 +29,25 @@ const nameInput = ref('')
 watch(open, (o) => {
   if (o) nameInput.value = chat.state.account?.displayName === chat.state.account?.username ? '' : chat.state.account?.displayName ?? ''
 }, { immediate: true })
+let nameTimer: ReturnType<typeof setTimeout> | undefined
 function saveName() {
+  clearTimeout(nameTimer)
+  const cur = chat.state.account?.displayName === chat.state.account?.username ? '' : chat.state.account?.displayName ?? ''
+  if (nameInput.value.trim() === cur) return
   try {
     chat.setDisplayName(nameInput.value)
   } catch (e) {
     toast.error(errMsg(e))
   }
 }
+// Also saved while typing (debounced) and when the dialog closes, so Esc doesn't lose it.
+watch(nameInput, () => {
+  clearTimeout(nameTimer)
+  if (open.value) nameTimer = setTimeout(saveName, 600)
+})
+watch(open, (o) => {
+  if (!o) saveName()
+})
 const avatarBusy = ref(false)
 
 const cropOpen = ref(false)
@@ -119,7 +131,7 @@ async function setReceipts(on: boolean) {
 
 async function toggleNotify(on: boolean) {
   const result = await setNotify(on)
-  if (on && !result) toast.error(notifySupported ? 'Notifications are blocked. Allow them in your browser settings.' : 'This browser does not support notifications.')
+  if (on && !result) toast.error(notifySupported ? (chat.isDesktop ? 'Notifications are blocked. Allow notifications for E2EE Chat in System Settings › Notifications.' : 'Notifications are blocked. Allow them in your browser settings.') : 'This browser does not support notifications.')
 }
 </script>
 
@@ -179,7 +191,7 @@ async function toggleNotify(on: boolean) {
         <div class="eyebrow">Notifications</div>
         <Toggle
           :model-value="notifyEnabled" :disabled="!notifySupported" label="Desktop notifications"
-          :description="notifyDenied ? 'Blocked by your browser. Allow notifications for this site to use this.' : 'Show a notification for new messages when you are not looking at the chat.'"
+          :description="notifyDenied ? (chat.isDesktop ? 'Blocked. Allow notifications for E2EE Chat in System Settings › Notifications.' : 'Blocked by your browser. Allow notifications for this site to use this.') : 'Show a notification for new messages when you are not looking at the chat.'"
           @update:model-value="toggleNotify"
         />
         <Toggle :model-value="soundEnabled" label="Sound" description="Play a short sound for new messages." @update:model-value="setSound" />

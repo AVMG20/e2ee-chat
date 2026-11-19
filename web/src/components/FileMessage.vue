@@ -11,7 +11,7 @@ const url = ref<string | null>(null)
 const loading = ref(true)
 
 const file = (): FileInfo => props.msg.file as FileInfo
-const isImage = () => file().mime.startsWith('image/')
+const isImage = () => chat.isImage(props.msg)
 
 watch(
   () => props.msg.id,

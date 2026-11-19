@@ -28,7 +28,7 @@ const hits = computed(() =>
 
 onMounted(load)
 // Unstarring elsewhere keeps the list current while it is open.
-watch(() => Object.keys(chat.state.starred).length, load)
+watch([() => chat.state.messages.length, () => chat.state.starred], load, { deep: true })
 
 async function choose(h: SearchHit) {
   closePanelOnNarrow()
