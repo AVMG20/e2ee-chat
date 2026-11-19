@@ -25,11 +25,18 @@ let unreadTimer: ReturnType<typeof setTimeout> | undefined
 
 const GROUP_MS = 5 * 60 * 1000
 
+let lastTop = 0
+
 function onScroll() {
   const el = scroller.value
   if (!el) return
-  stick = el.scrollHeight - el.scrollTop - el.clientHeight < 120
-  atBottom.value = stick
+  const near = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+  // Only moving up (the user scrolling) lets go of the bottom. Content growing below (images
+  // loading) also changes the distance, and its scroll event can arrive after the growth.
+  if (el.scrollTop < lastTop - 1) stick = near
+  else if (near) stick = true
+  lastTop = el.scrollTop
+  atBottom.value = stick || near
   checkUnread()
   if (el.scrollTop < 300) void loadMore()
 }
@@ -134,25 +141,17 @@ watch(
 )
 
 
-/** On open: if the first unread message is above the fold, scroll to it. */
+/** Chats open at the bottom; if the first unread message is above, the pill offers to jump up to it. */
 function settleUnread() {
-  const id = extra().firstUnread
-  if (!pendingUnread || !id) return
-  const el = find(id)
-  const sc = scroller.value
-  if (!el || !sc) return
-  pendingUnread = false
-  if (el.getBoundingClientRect().top < sc.getBoundingClientRect().top) {
-    el.scrollIntoView({ block: 'start' })
-    stick = false
-    atBottom.value = false
-  }
+  if (!pendingUnread) return
+  checkUnread()
 }
 
 watch(
   () => chat.state.active,
   async () => {
     stick = true
+    lastTop = 0
     atBottom.value = true
     unreadSeen = false
     unreadAbove.value = false

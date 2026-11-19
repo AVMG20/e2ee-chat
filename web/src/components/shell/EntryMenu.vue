@@ -31,7 +31,7 @@ async function open() {
 
 <template>
   <ContextMenu>
-    <ContextMenuTrigger as-child><slot /></ContextMenuTrigger>
+    <ContextMenuTrigger as-child class="select-none"><slot /></ContextMenuTrigger>
     <ContextMenuContent class="w-52">
       <ContextMenuItem @select="open"><MessageSquare />{{ openLabel ?? 'Open' }}</ContextMenuItem>
       <template v-if="conv">
