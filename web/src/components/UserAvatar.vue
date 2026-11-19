@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import StillImg from '@/components/StillImg.vue'
 import { chat } from '@/lib/chat'
 import { hueOf, initials } from '@/lib/format'
 
@@ -12,7 +13,9 @@ const props = withDefaults(defineProps<{
   online?: boolean
   /** Profile picture URL; initials are shown when missing or broken. */
   src?: string | null
-}>(), { id: undefined, size: 40, online: undefined, src: null })
+  /** Show only the first frame (animated pictures don't move). */
+  still?: boolean
+}>(), { id: undefined, size: 40, online: undefined, src: null, still: false })
 
 const broken = ref(false)
 
@@ -33,7 +36,7 @@ const dot = computed(() => {
 
 <template>
   <div class="relative shrink-0" :style="box">
-    <img v-if="src && !broken" :src="src" alt="" draggable="false" class="size-full rounded-full object-cover" @error="broken = true">
+    <StillImg v-if="src && !broken" :src="src" :still="still" class="size-full rounded-full object-cover" @error="broken = true" />
     <div
       v-else
       class="hue-bg flex size-full select-none items-center justify-center rounded-full font-semibold tracking-tight"

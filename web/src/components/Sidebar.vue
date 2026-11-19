@@ -5,6 +5,7 @@ import { toast } from 'vue-sonner'
 import NewGroupDialog from '@/components/NewGroupDialog.vue'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import EntryMenu from '@/components/shell/EntryMenu.vue'
+import StillImg from '@/components/StillImg.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { drafts } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
@@ -112,7 +113,7 @@ async function select(c: Conversation) {
                 :style="{ '--dot-ring': chat.state.active === c.id ? 'var(--active)' : 'var(--sidebar)' }"
                 @click="select(c)"
               >
-                <UserAvatar :name="c.title" :id="idOf(c)" :src="contactOf(c)?.avatar" :size="32" :online="contactOf(c)?.online" />
+                <UserAvatar :name="c.title" :id="idOf(c)" :src="contactOf(c)?.avatar" :size="32" :online="contactOf(c)?.online" :still="chat.state.active !== c.id" />
                 <span class="min-w-0 flex-1 leading-tight">
                   <span class="flex items-baseline gap-1.5">
                     <span class="min-w-0 flex-1 truncate text-[15px]" :class="c.unread > 0 ? 'font-semibold' : 'font-medium'">{{ c.title }}</span>
@@ -147,7 +148,7 @@ async function select(c: Conversation) {
                 :data-active="chat.state.active === c.id" :data-unread="c.unread > 0"
                 @click="select(c)"
               >
-                <img v-if="c.avatar" :src="c.avatar" alt="" class="size-8 shrink-0 rounded-full object-cover">
+                <StillImg v-if="c.avatar" :src="c.avatar" :still="chat.state.active !== c.id" class="size-8 shrink-0 rounded-full object-cover" />
                 <span v-else class="flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><Hash class="size-4" /></span>
                 <span class="min-w-0 flex-1 leading-tight">
                   <span class="flex items-baseline gap-1.5">
@@ -185,8 +186,8 @@ async function select(c: Conversation) {
                 :style="{ '--dot-ring': chat.state.active === c.id ? 'var(--active)' : 'var(--sidebar)' }"
                 @click="select(c)"
               >
-                <UserAvatar v-if="c.kind === 'dm'" :name="c.title" :id="idOf(c)" :src="contactOf(c)?.avatar" :size="32" :online="contactOf(c)?.online" />
-                <img v-else-if="c.avatar" :src="c.avatar" alt="" class="size-8 shrink-0 rounded-full object-cover">
+                <UserAvatar v-if="c.kind === 'dm'" :name="c.title" :id="idOf(c)" :src="contactOf(c)?.avatar" :size="32" :online="contactOf(c)?.online" :still="chat.state.active !== c.id" />
+                <StillImg v-else-if="c.avatar" :src="c.avatar" :still="chat.state.active !== c.id" class="size-8 shrink-0 rounded-full object-cover" />
                 <span v-else class="flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><Hash class="size-4" /></span>
                 <span class="min-w-0 flex-1 truncate text-[15px] font-medium">{{ c.title }}</span>
                 <span v-if="c.unread > 0" class="unread shrink-0" :class="c.muted && '!bg-zinc-500'">{{ c.unread > 99 ? '99+' : c.unread }}</span>
@@ -200,7 +201,7 @@ async function select(c: Conversation) {
     <!-- user panel -->
     <div class="flex h-[3.25rem] shrink-0 items-center gap-2 bg-rail/60 px-2" style="--dot-ring: color-mix(in srgb, var(--rail) 60%, var(--sidebar))">
       <button class="flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 text-left outline-none transition-colors hover:bg-hover focus-visible:shadow-[var(--glow)]" title="Account settings" aria-label="Account settings" @click="accountOpen = true">
-        <UserAvatar :name="chat.state.account?.displayName ?? '?'" :id="chat.state.account?.id" :src="chat.state.account?.avatar" :size="32" :online="chat.state.status === 'online'" />
+        <UserAvatar :name="chat.state.account?.displayName ?? '?'" :id="chat.state.account?.id" :src="chat.state.account?.avatar" :size="32" :online="chat.state.status === 'online'" still />
         <span class="min-w-0 flex-1 leading-tight">
           <span class="block truncate text-[13px] font-semibold">{{ chat.state.account?.displayName }}</span>
           <span class="block truncate font-mono text-[11px] text-muted-foreground">{{ copied ? 'ID copied' : myId }}</span>
