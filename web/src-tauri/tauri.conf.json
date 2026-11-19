@@ -45,7 +45,7 @@
     ],
     "shortDescription": "End-to-end encrypted chat for your own server",
     "license": "MIT",
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {
