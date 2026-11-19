@@ -232,6 +232,11 @@ interface Profile {
   mime: string
   /** Display name shown instead of my username ('' or missing: the username). */
   name?: string
+  /**
+   * In the synced vault: I have a picture, but its bytes aren't in the vault (they reach my other
+   * devices as an encrypted profile message, like they reach contacts; the vault has a size limit).
+   */
+  pic?: boolean
   at: number
   /** When it was last sent to all contacts (it's re-sent before old copies expire on the server). */
   sentAt: number
@@ -757,7 +762,7 @@ const validConvId = (c: string): c is ConvId =>
   (c.startsWith('dm:') && validId(c.slice(3))) || (c.startsWith('g:') && validGroupId(c.slice(2)))
 
 /** Profile pictures: still images are shrunk to fit easily; animated GIFs are kept as they are, up to this size. */
-const MAX_AVATAR_BYTES = 256 * 1024
+const MAX_AVATAR_BYTES = 2 * 1024 * 1024
 
 function parseVault(raw: unknown): VaultData {
   const v = (raw && typeof raw === 'object' ? raw : {}) as Partial<VaultData>
@@ -802,6 +807,7 @@ function parseVault(raw: unknown): VaultData {
     out.profile = { avatar: pr.avatar, mime: safeMime(pr.mime), at: pr.at, sentAt: pr.sentAt }
     const name = isStr(pr.name) ? cleanLabel(pr.name, MAX_DISPLAY_NAME) : ''
     if (name) out.profile.name = name
+    if (pr.pic === true) out.profile.pic = true
   }
   for (const [id, t] of Object.entries(dict(v.left))) if (validGroupId(id) && typeof t === 'number') out.left[id] = t
   return out
@@ -887,7 +893,8 @@ async function applyVault(s: Session, sealed: string | null | undefined) {
       state.settings = { readReceipts: s.settings.readReceipts }
     }
     if (remote.profile.at > s.profile.at) {
-      s.profile = remote.profile
+      // The picture's bytes come separately (own profile message), unless an older app put them in.
+      s.profile = { ...remote.profile }
       s.profileDirty = true
       showMyAvatar(s)
     } else if (remote.profile.at === s.profile.at && remote.profile.sentAt > s.profile.sentAt) {
@@ -1007,11 +1014,29 @@ function profileAudience(s: Session): string[] {
 function sendProfile(s: Session, ids: string[]) {
   const bytes = s.profile.avatar ? unb64(s.profile.avatar) : new Uint8Array(0)
   const at = s.profile.at || Date.now()
-  for (let i = 0; i < ids.length; i += 200) {
-    const body: PayloadBody = { t: 'profile', mime: s.profile.mime }
-    if (s.profile.name) body.name = s.profile.name
+  const body: PayloadBody = { t: 'profile', mime: s.profile.mime }
+  if (s.profile.name) body.name = s.profile.name
+  // Every envelope is also for me, so my other devices get it too (even with no contacts yet).
+  for (let i = 0; i === 0 || i < ids.length; i += 200) {
     sendEnvelope(s, ids.slice(i, i + 200), { conv: { t: 'dm' }, body }, bytes, randomId(), at)
   }
+}
+
+/** My profile from another of my devices. Only call from inside serial(). */
+function receiveOwnProfile(s: Session, ts: number, mime: string, bytes: Uint8Array, rawName?: string) {
+  if (bytes.length > MAX_AVATAR_BYTES || (bytes.length && !SAFE_MIME.has(mime))) return
+  const p = s.profile
+  // Newer, or the bytes for the picture the vault told me about.
+  const fills = ts === p.at && !p.avatar && !!p.pic && bytes.length > 0
+  if (ts <= p.at && !fills) return
+  const name = rawName ? cleanLabel(rawName, MAX_DISPLAY_NAME) : ''
+  s.profile = { avatar: bytes.length ? b64(bytes) : null, mime: bytes.length ? safeMime(mime) : '', at: ts, sentAt: Math.max(p.sentAt, ts) }
+  if (name) s.profile.name = name
+  else if (fills && p.name) s.profile.name = p.name
+  s.profileDirty = true
+  showMyAvatar(s)
+  refreshConversations()
+  scheduleFlush(s)
 }
 
 /** New contacts get my picture shortly after I first see them. */
@@ -1816,7 +1841,11 @@ async function handlePayload(
   }
 
   if (body.t === 'profile') {
-    if (mine || pc.t !== 'dm' || !s.pins[sender] || state.blocked.some((b) => b.id === sender)) return
+    if (mine) {
+      if (pc.t === 'dm') receiveOwnProfile(s, ts, body.mime, attachment, body.name)
+      return
+    }
+    if (pc.t !== 'dm' || !s.pins[sender] || state.blocked.some((b) => b.id === sender)) return
     await receiveProfile(s, sender, ts, body.mime, attachment, body.name)
     return
   }
@@ -2924,7 +2953,7 @@ export interface CropArea {
 async function encodeAvatar(file: Blob, crop?: CropArea): Promise<{ bytes: Uint8Array; mime: string }> {
   if (file.type === 'image/gif') {
     // Kept as is, so it stays animated (round avatars show the middle of it).
-    if (file.size > MAX_AVATAR_BYTES) throw new Error(`GIFs can be up to ${MAX_AVATAR_BYTES / 1024} KB`)
+    if (file.size > MAX_AVATAR_BYTES) throw new Error(`This GIF is ${(file.size / 1024 / 1024).toFixed(1)} MB; GIFs can be up to ${MAX_AVATAR_BYTES / 1024 / 1024} MB`)
     const bytes = new Uint8Array(await file.arrayBuffer())
     const head = new TextDecoder().decode(bytes.subarray(0, 6))
     if (head !== 'GIF87a' && head !== 'GIF89a') throw new Error("That image couldn't be opened")
@@ -3494,7 +3523,8 @@ function vaultData(s: Session): VaultData {
     left: { ...s.left },
     prefs: { ...s.prefs },
     settings: s.settings,
-    profile: s.profile,
+    // Without the picture's bytes (they can be up to 2 MB): see Profile.pic.
+    profile: { ...s.profile, avatar: null, pic: !!s.profile.avatar || !!s.profile.pic },
     stars: { ...s.stars },
   }))
 }
