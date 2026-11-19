@@ -11,7 +11,7 @@ import { errMsg, relTime } from '@/lib/format'
 import { openConversation, openFriends, showConv } from '@/lib/nav'
 import { docToText } from '@/lib/render'
 import { isDark, toggleTheme } from '@/lib/theme'
-import { accountOpen, muteTitle, paletteOpen, paletteScope, useCopy } from '@/lib/ui'
+import { accountOpen, muteTitle, paletteOpen, useCopy } from '@/lib/ui'
 import type { Conversation } from '@/lib/types'
 
 const groupOpen = ref(false)
@@ -48,7 +48,7 @@ async function select(c: Conversation) {
     <div class="flex h-12 shrink-0 items-center gap-1.5 border-b border-sidebar-border px-2.5">
       <button
         class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md bg-inset px-2.5 text-left text-sm text-muted-foreground outline-none transition-shadow hover:text-foreground focus-visible:shadow-[var(--glow)]"
-        aria-label="Search conversations" @click="paletteScope = null; paletteOpen = true"
+        aria-label="Search conversations" @click="paletteOpen = true"
       >
         <Search class="size-4 shrink-0" />
         <span class="flex-1 truncate">Search</span>

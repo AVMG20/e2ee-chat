@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { Hash, Loader2, MessageSquare, Search, X } from 'lucide-vue-next'
+import { Hash, Loader2, MessageSquare, Search } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
 import { errMsg, relTime } from '@/lib/format'
 import { openConversation } from '@/lib/nav'
-import { paletteScope } from '@/lib/ui'
 import type { ConvId, SearchHit } from '@/lib/types'
 
 const open = defineModel<boolean>('open', { required: true })
@@ -49,11 +48,7 @@ const query = ref('')
 const index = ref(0)
 const list = ref<HTMLElement | null>(null)
 
-const scopeTitle = computed(() => chat.state.conversations.find((c) => c.id === paletteScope.value)?.title ?? '')
-const scoped = computed(() => !!paletteScope.value)
-
 const results = computed(() => {
-  if (scoped.value) return []
   const q = query.value.trim().toLowerCase().replace(/-/g, '')
   if (!q) return items.value
   return items.value
@@ -81,7 +76,7 @@ function runSearch(q: string) {
   timer = setTimeout(async () => {
     let found: SearchHit[] = []
     try {
-      found = await chat.search(q, paletteScope.value ? { conv: paletteScope.value } : undefined)
+      found = await chat.search(q)
     } catch {
       /* not signed in / search unavailable */
     }
@@ -104,10 +99,6 @@ watch(open, (o) => {
 watch(query, (q) => {
   index.value = 0
   runSearch(q)
-})
-watch(paletteScope, () => {
-  index.value = 0
-  runSearch(query.value)
 })
 
 const total = computed(() => results.value.length + hits.value.length)
@@ -162,14 +153,10 @@ async function choose(it: Item | undefined) {
     <DialogContent :show-close-button="false" class="top-[16%] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-lg">
       <DialogTitle class="sr-only">Quick switcher</DialogTitle>
       <DialogDescription class="sr-only">Jump to a friend, direct message or group, or search messages.</DialogDescription>
-      <div v-if="scoped" class="flex items-center gap-2 px-3 pt-3 text-xs text-muted-foreground">
-        <span class="min-w-0 truncate">Searching in <strong class="font-semibold text-foreground">{{ scopeTitle }}</strong></span>
-        <button type="button" class="btn btn-soft btn-sm !h-6 shrink-0 !px-2" title="Search all chats" aria-label="Search all chats" @click="paletteScope = null"><X class="!size-3" />All chats</button>
-      </div>
       <div class="field-icon border-b border-line p-3">
         <Search class="!left-6" />
         <input
-          v-model="query" class="field !h-10" :placeholder="scoped ? `Search in ${scopeTitle}` : 'Search chats and messages'" :aria-label="scoped ? `Search in ${scopeTitle}` : 'Search conversations'" autocomplete="off" spellcheck="false"
+          v-model="query" class="field !h-10" :placeholder="'Search chats and messages'" aria-label="Search conversations" autocomplete="off" spellcheck="false"
           @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)" @keydown.enter.prevent="choose2(index)"
         >
       </div>
@@ -188,9 +175,9 @@ async function choose(it: Item | undefined) {
             <span v-if="it.unread > 0" class="unread shrink-0">{{ it.unread > 99 ? '99+' : it.unread }}</span>
           </button>
         </li>
-        <li v-if="!results.length && !hits.length && !searching && (!scoped || query.trim())" class="px-3 py-8 text-center text-sm text-muted-foreground">No matches.</li>
+        <li v-if="!results.length && !hits.length && !searching" class="px-3 py-8 text-center text-sm text-muted-foreground">No matches.</li>
         <template v-if="hits.length || searching">
-          <li v-if="!scoped" class="eyebrow flex items-center gap-2 px-2 pt-3 pb-1" role="presentation">Messages<Loader2 v-if="searching" class="size-3 animate-spin" /></li>
+          <li class="eyebrow flex items-center gap-2 px-2 pt-3 pb-1" role="presentation">Messages<Loader2 v-if="searching" class="size-3 animate-spin" /></li>
           <li v-for="(h, n) in hits" :key="h.msg.conv + h.msg.id" role="option" :aria-selected="results.length + n === index">
             <button
               class="row flex w-full items-start gap-3 rounded-md px-2 py-2 text-left outline-none"

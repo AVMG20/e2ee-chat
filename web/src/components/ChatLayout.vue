@@ -10,14 +10,13 @@ import Rail from '@/components/Rail.vue'
 import Sidebar from '@/components/Sidebar.vue'
 import CommandPalette from '@/components/shell/CommandPalette.vue'
 import FriendsView from '@/components/shell/FriendsView.vue'
-import StarredDialog from '@/components/StarredDialog.vue'
 import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { addMembersGroup, openFriends, pendingAction, renameGroupId, showChats, showConv, view } from '@/lib/nav'
 import { startNotifications } from '@/lib/notify'
 import { checkForUpdate } from '@/lib/desktop'
-import { accountOpen, friendsOpen, paletteOpen, paletteScope, starredOpen } from '@/lib/ui'
+import { accountOpen, friendsOpen, paletteOpen } from '@/lib/ui'
 
 // On narrow screens only one of sidebar / main area is visible (see showConv in lib/nav).
 const pwOpen = ref(false)
@@ -102,7 +101,6 @@ const renameOpen = computed({
 function onKey(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
     e.preventDefault()
-    paletteScope.value = null
     paletteOpen.value = !paletteOpen.value
   }
 }
@@ -150,7 +148,6 @@ onBeforeUnmount(() => {
     <AccountDialog v-model:open="accountOpen" @change-password="pwOpen = true" @sign-out="signOutOpen = true" />
     <ChangePasswordDialog v-model:open="pwOpen" />
     <CommandPalette v-model:open="paletteOpen" />
-    <StarredDialog v-model:open="starredOpen" />
     <AddMembersDialog v-if="membersGroup" v-model:open="membersOpen" :group="membersGroup" />
     <RenameGroupDialog v-if="renameGroup" v-model:open="renameOpen" :group="renameGroup" />
     <ConfirmDialog

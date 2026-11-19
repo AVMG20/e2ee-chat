@@ -4,10 +4,15 @@ import { Download, MessageSquare, Moon, Settings, Star, Sun, Users } from 'lucid
 import RailButton from '@/components/shell/RailButton.vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { chat } from '@/lib/chat'
-import { openFriends, showChats, view } from '@/lib/nav'
+import { showChats, openFriends, view } from '@/lib/nav'
 import { isDark, toggleTheme } from '@/lib/theme'
-import { accountOpen, starredOpen } from '@/lib/ui'
+import { accountOpen, sidePanel, starredScope } from '@/lib/ui'
 
+function openStarred() {
+  view.value = 'chats'
+  starredScope.value = 'all'
+  sidePanel.value = 'starred'
+}
 const incoming = computed(() => chat.state.requests.incoming.length)
 const unread = computed(() => chat.state.conversations.reduce((n, c) => n + c.unread, 0))
 </script>
@@ -31,7 +36,7 @@ const unread = computed(() => chat.state.conversations.reduce((n, c) => n + c.un
         </template>
       </RailButton>
 
-      <RailButton label="Starred messages" @click="starredOpen = true"><Star class="size-5" /></RailButton>
+      <RailButton label="Starred messages" @click="openStarred"><Star class="size-5" /></RailButton>
 
       <div class="flex-1" />
 

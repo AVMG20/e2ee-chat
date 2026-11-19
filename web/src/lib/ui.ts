@@ -2,17 +2,36 @@ import { onBeforeUnmount, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
 import { errMsg, formatClock } from '@/lib/format'
-import type { Conversation, ConvId } from '@/lib/types'
+import type { Contact, Conversation, ConvId } from '@/lib/types'
 
 /** Legacy trigger: setting this to true opens the Friends view (ChatLayout resets it). */
 export const friendsOpen = ref(false)
 export const accountOpen = ref(false)
 export const paletteOpen = ref(false)
-/** When set, the palette searches only this conversation (Ctrl+K clears it). */
-export const paletteScope = ref<ConvId | null>(null)
-export const starredOpen = ref(false)
-/** Media and files dialog for the active conversation. */
-export const mediaOpen = ref(false)
+/** Right-hand panel of the conversation view; stays open when switching chats. */
+export type SidePanel = 'info' | 'search' | 'media' | 'starred'
+export const sidePanel = ref<SidePanel | null>(null)
+/** Starred panel: only the open chat, or every chat. */
+export const starredScope = ref<'chat' | 'all'>('chat')
+
+/** Below lg the panel covers the conversation, so close it after jumping to a message. */
+export function closePanelOnNarrow() {
+  if (!window.matchMedia('(min-width: 1024px)').matches) sidePanel.value = null
+}
+
+/** Accept the contact's new key (after the user has checked it). */
+export async function trustNewKey(c: Contact | null) {
+  if (!c) return
+  if (!c.pendingFingerprint) {
+    toast.error('The new key is not available yet. Try again in a moment.')
+    return
+  }
+  try {
+    await chat.trustNewKey(c.id, c.pendingFingerprint)
+  } catch (e) {
+    toast.error(errMsg(e))
+  }
+}
 
 export const MUTE_OPTIONS = [
   { label: 'Mute for 1 hour', ms: 3600_000 },

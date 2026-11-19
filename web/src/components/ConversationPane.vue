@@ -1,26 +1,27 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  ArrowLeft, AtSign, Bell, BellOff, Check, Copy, Ellipsis, Hash, Images, Loader2, LogOut, MessageCircle, Pencil, Search, Star, ShieldAlert, ShieldCheck, Upload, UserMinus, UserPlus, Users,
+  ArrowLeft, AtSign, Bell, BellOff, Check, Copy, Ellipsis, Hash, Images, Info, Loader2, LogOut, MessageCircle, Pencil, Search, Star, ShieldAlert, ShieldCheck, Upload, User, UserPlus, Users,
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
-import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
-} from '@/components/ui/dialog'
-import AddMembersDialog from '@/components/AddMembersDialog.vue'
 import Composer from '@/components/Composer.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub,
   DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import MediaDialog from '@/components/MediaDialog.vue'
+import InfoPanel from '@/components/panels/InfoPanel.vue'
+import MediaPanel from '@/components/panels/MediaPanel.vue'
 import MessageList from '@/components/MessageList.vue'
+import SearchPanel from '@/components/panels/SearchPanel.vue'
+import SidePanel from '@/components/SidePanel.vue'
+import StarredPanel from '@/components/panels/StarredPanel.vue'
+import { viewerId } from '@/components/messages/state'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
-import { renameGroupId, pendingAction } from '@/lib/nav'
-import { MUTE_OPTIONS, copyText, friendsOpen, mediaOpen, muteFor, paletteOpen, paletteScope, setPrefs, starredOpen } from '@/lib/ui'
+import { addMembersGroup, renameGroupId } from '@/lib/nav'
+import { MUTE_OPTIONS, copyText, friendsOpen, muteFor, setPrefs, sidePanel, starredScope, trustNewKey, type SidePanel as PanelName } from '@/lib/ui'
 
 defineEmits<{ back: [] }>()
 
@@ -30,25 +31,12 @@ const contact = computed(() => (dmId.value ? chat.state.contacts[dmId.value] ?? 
 const convKey = computed(() => (conv.value ? conv.value.id.slice(conv.value.kind === 'dm' ? 3 : 2) : ''))
 const hasFriends = computed(() => Object.values(chat.state.contacts).some((c) => c.friend))
 const myId = computed(() => chat.formatId(chat.state.account?.id ?? ''))
-const nameOf = (id: string) => chat.displayName(id)
 const group = computed(() =>
   conv.value?.kind === 'group' ? chat.state.groups[conv.value.id.slice(2)] ?? null : null,
 )
 
 const isAdmin = computed(() => (group.value ? chat.isGroupAdmin(group.value.id) : false))
-const adminOf = (m: string) => !!group.value?.admins?.includes(m)
 
-async function setAdmin(m: string, on: boolean) {
-  if (!group.value) return
-  try {
-    await chat.setAdmin(group.value.id, m, on)
-  } catch (e) {
-    toast.error(errMsg(e))
-  }
-}
-
-const membersOpen = ref(false)
-const addOpen = ref(false)
 const leaveOpen = ref(false)
 const busy = ref(false)
 
@@ -71,30 +59,29 @@ function onDrop(e: DragEvent) {
 }
 
 async function trust() {
-  const c = contact.value
-  if (!c) return
-  if (!c.pendingFingerprint) {
-    toast.error('The new key is not available yet. Try again in a moment.')
-    return
-  }
   busy.value = true
   try {
-    await chat.trustNewKey(c.id, c.pendingFingerprint)
-  } catch (e) {
-    toast.error(errMsg(e))
+    await trustNewKey(contact.value)
   } finally {
     busy.value = false
   }
 }
 
-async function addFriend(id: string) {
-  try {
-    await chat.sendFriendRequest(id)
-    toast.success('Friend request sent')
-  } catch (e) {
-    toast.error(errMsg(e))
-  }
+const panelTitles: Record<PanelName, string> = { info: 'Members', search: 'Search', media: 'Media and files', starred: 'Starred messages' }
+const panelTitle = computed(() => (sidePanel.value === 'info' && contact.value ? 'User info' : sidePanel.value ? panelTitles[sidePanel.value] : ''))
+/** The panel shows beside an open chat; the starred panel (from the rail) also works without one. */
+const panelShown = computed(() => !!sidePanel.value && (!!conv.value || sidePanel.value === 'starred'))
+const togglePanel = (p: PanelName) => (sidePanel.value = sidePanel.value === p ? null : p)
+const showStarred = () => { starredScope.value = 'chat'; sidePanel.value = 'starred' }
+
+// Esc closes the panel, unless it was meant for a dialog, menu or the image viewer.
+function onKey(e: KeyboardEvent) {
+  if (e.key !== 'Escape' || e.defaultPrevented || !sidePanel.value || viewerId.value) return
+  if (document.querySelector('[role="dialog"], [role="menu"], [role="alertdialog"]')) return
+  sidePanel.value = null
 }
+onMounted(() => window.addEventListener('keydown', onKey))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 async function leave() {
   if (!group.value) return
@@ -112,9 +99,11 @@ async function leave() {
 
 <template>
   <main
-    class="relative min-w-0 flex-col overflow-hidden bg-background"
+    class="relative min-w-0 overflow-hidden bg-background"
     @dragenter.prevent="onDragEnter" @dragover.prevent @dragleave="onDragLeave" @drop.prevent="onDrop"
   >
+    <div class="relative flex min-h-0 min-w-0 flex-1">
+    <div class="relative flex min-w-0 flex-1 flex-col">
     <!-- Empty state -->
     <div v-if="!conv" class="relative flex flex-1 flex-col items-center justify-center gap-6 p-8 text-center">
       <button class="btn btn-soft btn-sm absolute top-3 left-3 md:hidden" @click="$emit('back')"><ArrowLeft />Chats</button>
@@ -146,10 +135,14 @@ async function leave() {
           <button v-if="group && isAdmin" class="self-center text-muted-foreground hover:text-foreground" title="Rename group" aria-label="Rename group" @click="renameGroupId = group.id"><Pencil class="size-3.5" /></button>
           <ShieldCheck v-if="contact?.verified" class="size-4 shrink-0 self-center text-success" title="Verified" />
           <span v-if="contact" class="hidden truncate text-xs text-muted-foreground sm:inline">{{ contact.online ? 'Online' : 'Offline' }}</span>
-          <button v-else-if="group" class="truncate text-xs text-muted-foreground hover:text-foreground hover:underline" @click="membersOpen = true">{{ group.members.length }} members</button>
+          <button v-else-if="group" class="truncate text-xs text-muted-foreground hover:text-foreground hover:underline" @click="sidePanel = 'info'">{{ group.members.length }} members</button>
         </div>
 
-        <button class="btn btn-ghost btn-icon btn-sm" title="Search messages" aria-label="Search messages" @click="paletteScope = conv.id; paletteOpen = true"><Search /></button>
+        <button class="btn btn-ghost btn-icon btn-sm" :class="sidePanel === 'search' && 'bg-soft text-foreground'" :aria-pressed="sidePanel === 'search'" title="Search messages" aria-label="Search messages" @click="togglePanel('search')"><Search /></button>
+        <button
+          class="btn btn-ghost btn-icon btn-sm" :class="sidePanel === 'info' && 'bg-soft text-foreground'" :aria-pressed="sidePanel === 'info'"
+          :title="group ? 'Members' : 'User info'" :aria-label="group ? 'Members' : 'User info'" @click="togglePanel('info')"
+        ><Users v-if="group" /><User v-else /></button>
 
         <DropdownMenu>
           <DropdownMenuTrigger as-child>
@@ -157,13 +150,14 @@ async function leave() {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" class="w-56">
             <template v-if="group">
-              <DropdownMenuItem @select="membersOpen = true"><Users />Members</DropdownMenuItem>
-              <DropdownMenuItem @select="addOpen = true"><UserPlus />Add members</DropdownMenuItem>
+              <DropdownMenuItem @select="sidePanel = 'info'"><Users />Members</DropdownMenuItem>
+              <DropdownMenuItem @select="addMembersGroup = group.id"><UserPlus />Add members</DropdownMenuItem>
               <DropdownMenuItem v-if="isAdmin" @select="renameGroupId = group.id"><Pencil />Rename group</DropdownMenuItem>
               <DropdownMenuSeparator />
             </template>
-            <DropdownMenuItem @select="mediaOpen = true"><Images />Media and files</DropdownMenuItem>
-            <DropdownMenuItem @select="starredOpen = true"><Star />Starred messages</DropdownMenuItem>
+            <DropdownMenuItem v-if="contact" @select="sidePanel = 'info'"><Info />User info</DropdownMenuItem>
+            <DropdownMenuItem @select="sidePanel = 'media'"><Images />Media and files</DropdownMenuItem>
+            <DropdownMenuItem @select="showStarred"><Star />Starred messages</DropdownMenuItem>
             <DropdownMenuItem v-if="conv.muted" @select="setPrefs(conv.id, { muted: false })"><Bell />Unmute</DropdownMenuItem>
             <DropdownMenuSub v-else>
               <DropdownMenuSubTrigger><BellOff />Mute</DropdownMenuSubTrigger>
@@ -201,7 +195,6 @@ async function leave() {
       </div>
 
       <MessageList />
-      <MediaDialog />
 
       <div class="shrink-0 px-3 pb-1 sm:px-4 sm:pb-2"><Composer ref="composer" :disabled="!!contact?.keyChanged" /></div>
 
@@ -216,37 +209,6 @@ async function leave() {
       </Transition>
 
       <template v-if="group">
-        <Dialog v-model:open="membersOpen">
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>{{ group.name }}</DialogTitle>
-              <DialogDescription>{{ group.members.length }} members</DialogDescription>
-            </DialogHeader>
-            <ul class="well max-h-72 space-y-0.5 overflow-y-auto rounded-md p-1.5 text-sm">
-              <li v-for="m in group.members" :key="m" class="flex items-center gap-3 rounded-md px-2 py-1.5" style="--dot-ring: var(--card)">
-                <UserAvatar :name="nameOf(m)" :id="m" :src="m === chat.state.account?.id ? chat.state.account?.avatar : chat.state.contacts[m]?.avatar" :size="32" :online="m === chat.state.account?.id ? true : chat.state.contacts[m]?.friend ? !!chat.state.contacts[m]?.online : undefined" />
-                <span class="min-w-0 flex-1 truncate font-medium">{{ nameOf(m) }}</span>
-                <span v-if="adminOf(m)" class="rounded bg-primary/15 px-1.5 py-px text-[11px] font-semibold text-[var(--link)]">Admin</span>
-                <span v-if="m === chat.state.account?.id" class="text-xs text-muted-foreground">you</span>
-                <button v-else-if="!chat.state.contacts[m]?.friend" class="btn btn-soft btn-sm" @click="addFriend(m)"><UserPlus />Add friend</button>
-                <DropdownMenu v-if="isAdmin && m !== chat.state.account?.id">
-                  <DropdownMenuTrigger as-child>
-                    <button class="btn btn-ghost btn-icon btn-sm" title="Member options" aria-label="Member options"><Ellipsis /></button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" class="w-48">
-                    <template v-if="group.admins">
-                      <DropdownMenuItem v-if="adminOf(m)" @select="setAdmin(m, false)"><ShieldCheck />Remove as admin</DropdownMenuItem>
-                      <DropdownMenuItem v-else @select="setAdmin(m, true)"><ShieldCheck />Make admin</DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                    </template>
-                    <DropdownMenuItem variant="destructive" @select="membersOpen = false; pendingAction = { kind: 'kick', id: m, group: group.id }"><UserMinus />Remove from group</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </li>
-            </ul>
-          </DialogContent>
-        </Dialog>
-        <AddMembersDialog v-model:open="addOpen" :group="group" />
         <ConfirmDialog
           v-model:open="leaveOpen"
           title="Leave group?"
@@ -257,5 +219,14 @@ async function leave() {
         />
       </template>
     </template>
+    </div>
+
+    <SidePanel v-if="panelShown" :title="panelTitle">
+      <InfoPanel v-if="sidePanel === 'info'" />
+      <SearchPanel v-else-if="sidePanel === 'search'" />
+      <MediaPanel v-else-if="sidePanel === 'media'" />
+      <StarredPanel v-else-if="sidePanel === 'starred'" />
+    </SidePanel>
+    </div>
   </main>
 </template>
