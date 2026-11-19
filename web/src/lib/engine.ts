@@ -68,9 +68,13 @@ type PayloadBody =
   | { t: 'react'; target: string; emoji: string; on: boolean }
   /** Sent as a signal (relayed live, never stored). */
   | { t: 'typing' }
+  /** "Send me your profile again": my copy is older than the version your messages mention (header.pv). */
+  | { t: 'preq' }
 interface PayloadHeader {
   conv: PayloadConv
   body: PayloadBody
+  /** On chat messages: the sender's profile version (Profile.at), so others can ask for it if theirs is older. */
+  pv?: number
 }
 
 /** [4-byte header length][header JSON][attachment bytes] */
@@ -133,6 +137,7 @@ function validHeader(h: PayloadHeader): boolean {
     case 'react':
       return validTarget(b.target) && isStr(b.emoji) && b.emoji.length > 0 && b.emoji.length <= 16 && typeof b.on === 'boolean'
     case 'typing':
+    case 'preq':
       return true
     case 'group':
       return validGroupId(b.id) && isStr(b.name) && isIdList(b.members) && (b.admins === undefined || isIdList(b.admins))
@@ -553,6 +558,10 @@ class Session {
   profile: Profile = defaultProfile()
   /** Object URLs of group pictures (group ID → URL). */
   groupPicUrls = new Map<string, string>()
+  /** Version (time) of each contact's profile I have, and when I last asked someone / was asked for one. */
+  profileAt = new Map<string, number>()
+  profileAsking = new Map<string, number>()
+  profileAsked = new Map<string, number>()
   /** Display names contacts chose (user ID → name). */
   names = new Map<string, string>()
   /** Object URLs of profile pictures (user ID → URL); mine under my own ID. */
@@ -989,6 +998,7 @@ async function receiveProfile(s: Session, sender: string, ts: number, mime: stri
   const stored: StoredAvatar = { at: ts, mime, bytes }
   if (name) stored.name = name
   await set(K.avatar(sender), stored, db)
+  s.profileAt.set(sender, ts)
   if (!live(s)) return
   setAvatarUrl(s, sender, bytes, mime)
   setDisplayNameOf(s, sender, name)
@@ -1000,6 +1010,19 @@ function setDisplayNameOf(s: Session, id: string, name: string) {
   else s.names.delete(id)
   if (state.contacts[id]) updateContactFromPin(s, id)
   refreshConversations()
+}
+
+/** Asks a contact to send their profile again (mine is older than their messages say). At most every 10 minutes. */
+function askProfile(s: Session, id: string) {
+  if (s.fresh || !s.pins[id] || state.contacts[id]?.keyChanged || state.blocked.some((b) => b.id === id)) return
+  const last = s.profileAsking.get(id) ?? 0
+  if (Date.now() - last < 600_000) return
+  s.profileAsking.set(id, Date.now())
+  try {
+    sendEnvelope(s, [id], { conv: { t: 'dm' }, body: { t: 'preq' } })
+  } catch {
+    /* asked again with a later message */
+  }
 }
 
 /** Everyone I can send to: pinned contacts whose key hasn't changed. */
@@ -1757,7 +1780,7 @@ async function handlePayload(
   recipients: string[],
   mid: string,
   ts: number,
-  { conv: pc, body }: PayloadHeader,
+  { conv: pc, body, pv }: PayloadHeader,
   attachment: Uint8Array,
 ) {
   const me = s.me
@@ -1840,6 +1863,20 @@ async function handlePayload(
     return
   }
 
+  if (body.t === 'preq') {
+    // Someone I share a chat with has an older copy of my profile: send it to them (at most hourly).
+    if (mine || !s.pins[sender] || state.blocked.some((b) => b.id === sender)) return
+    const last = s.profileAsked.get(sender) ?? 0
+    if (Date.now() - last < 3600_000 || (!s.profile.avatar && !s.profile.name)) return
+    s.profileAsked.set(sender, Date.now())
+    try {
+      sendProfile(s, [sender])
+    } catch {
+      /* they ask again with a later message */
+    }
+    return
+  }
+
   if (body.t === 'profile') {
     if (mine) {
       if (pc.t === 'dm') receiveOwnProfile(s, ts, body.mime, attachment, body.name)
@@ -1886,6 +1923,7 @@ async function handlePayload(
     return
   }
 
+  if (!mine && typeof pv === 'number' && pv > (s.profileAt.get(sender) ?? 0)) askProfile(s, sender)
   const msg: ChatMessage = { id: mid, conv, from: sender, ts, kind: 'text', status: mine ? 'sent' : 'received' }
   if (body.reply) msg.reply = await resolveReply(s, conv, body.reply)
   if (body.fwd) msg.forwarded = true
@@ -2240,6 +2278,7 @@ async function loadSession(saved: Saved): Promise<Session> {
     const a = avatars[i]
     if (a?.bytes instanceof Uint8Array) setAvatarUrl(s, key.slice(7), a.bytes, a.mime)
     if (a?.name && isStr(a.name)) s.names.set(key.slice(7), a.name)
+    if (typeof a?.at === 'number') s.profileAt.set(key.slice(7), a.at)
   })
 
   if (session) stop(session)
@@ -2660,7 +2699,9 @@ async function sendContent(
   const mid = msgId(s.me, id)
   const ts = Date.now()
   // Sealed now, with the keys pinned now: throws before anything is shown if a key changed.
-  const env = seal(s.identity, s.me, recipientKeys(s, to), encodePayload(header(pc), attachment), id, ts)
+  const head = header(pc)
+  if (s.profile.at && (s.profile.avatar || s.profile.pic || s.profile.name)) head.pv = s.profile.at
+  const env = seal(s.identity, s.me, recipientKeys(s, to), encodePayload(head, attachment), id, ts)
   const msg: ChatMessage = { id: mid, conv, from: s.me, ts, kind: 'text', status: 'sending', ...local }
   if (attachment) {
     if (!live(s)) return

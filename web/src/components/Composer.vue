@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import UserAvatar from '@/components/UserAvatar.vue'
 import { Extension } from '@tiptap/core'
 import { Placeholder } from '@tiptap/extensions'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
@@ -353,7 +354,9 @@ const tools: Tool[] = [
           type="button" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left"
           :class="i === mentionIdx ? 'bg-active' : 'hover:bg-hover'" @mousedown.prevent="pickMention(i)"
         >
-          <span class="font-medium">{{ c.name }}</span>
+          <UserAvatar :name="c.name" :id="c.id" :src="chat.state.contacts[c.id]?.avatar" :size="24" :online="chat.state.contacts[c.id]?.friend ? chat.state.contacts[c.id]?.online : undefined" still style="--dot-ring: var(--popover)" />
+          <span class="min-w-0 flex-1 truncate font-medium">{{ c.name }}</span>
+          <span v-if="chat.state.contacts[c.id]?.username && chat.state.contacts[c.id]?.username !== c.name" class="truncate text-xs text-muted-foreground">@{{ chat.state.contacts[c.id]?.username }}</span>
         </button>
       </li>
     </ul>
