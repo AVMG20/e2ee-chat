@@ -6,7 +6,7 @@ import ForwardDialog from '@/components/ForwardDialog.vue'
 import ImageViewer from '@/components/messages/ImageViewer.vue'
 import MessageItem from '@/components/MessageItem.vue'
 import MessageSheet from '@/components/messages/MessageSheet.vue'
-import { deleteMsg, deleteTarget, editingId, extra, flashId, sheetMsg, viewerId } from '@/components/messages/state'
+import { deleteMsg, deleteTarget, editingId, extra, flashId, scrollRequest, sheetMsg, viewerId } from '@/components/messages/state'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
@@ -45,6 +45,7 @@ function onScroll() {
   else if (near) stick = true
   lastTop = el.scrollTop
   atBottom.value = stick || near
+  chat.setAtBottom(atBottom.value)
   checkUnread()
   if (el.scrollTop < 300) void loadMore()
 }
@@ -105,6 +106,20 @@ function toBottom(smooth = false) {
   if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
 }
 
+// The engine keeps new messages unread while the open chat isn't scrolled to the newest one.
+watch(atBottom, (v) => chat.setAtBottom(v))
+/** Unread messages in the open chat (they pile up while scrolled up). */
+const unreadCount = computed(() => chat.state.conversations.find((c) => c.id === chat.state.active)?.unread ?? 0)
+
+// Asked by the composer: Esc = newest message, PageUp/PageDown = scroll about a screen.
+watch(scrollRequest, (r) => {
+  const el = scroller.value
+  if (!r || !el) return
+  if (r.dir === 'bottom') return latest()
+  markUser() // a deliberate scroll, so scrolling up lets go of the bottom
+  el.scrollBy({ top: (r.dir === 'up' ? -0.9 : 0.9) * el.clientHeight })
+})
+
 function latest() {
   stick = true
   toBottom(true)
@@ -121,6 +136,7 @@ function reveal(id: string): boolean {
   stick = false
   el.scrollIntoView({ block: 'center' })
   flashId.value = id
+  void nextTick(() => chat.setAtBottom(atBottom.value))
   clearTimeout(flashTimer)
   flashTimer = setTimeout(() => (flashId.value = null), 1600)
   return true
@@ -163,6 +179,7 @@ watch(
     stick = true
     lastTop = 0
     atBottom.value = true
+    chat.setAtBottom(true)
     unreadSeen = false
     unreadAbove.value = false
     openedAt = Date.now()
@@ -201,6 +218,7 @@ onMounted(() => {
   }
 })
 onBeforeUnmount(() => {
+  chat.setAtBottom(true)
   ro?.disconnect()
   clearTimeout(flashTimer)
   clearTimeout(unreadTimer)
@@ -249,6 +267,32 @@ function confirmDelete() {
   if (m) void deleteMsg(m)
 }
 
+// ---------- screen reader announcements ----------
+const announcement = ref('')
+let announceTimer: ReturnType<typeof setTimeout> | undefined
+let lastSeen: { conv: string | null; id: string | undefined } = { conv: null, id: undefined }
+watch(
+  () => chat.state.messages.length,
+  () => {
+    const ms = chat.state.messages
+    const last = ms[ms.length - 1]
+    const prev = lastSeen
+    lastSeen = { conv: chat.state.active, id: last?.id }
+    // Only a new newest message in the same, already open chat from someone else.
+    if (!last || prev.conv !== chat.state.active || prev.id === last.id || prev.id === undefined) return
+    if (last.kind === 'system' || last.from === chat.state.account?.id || last.ts < openedAt) return
+    announcement.value = `${chat.displayName(last.from)}: ${chat.previewText(last)}`
+    clearTimeout(announceTimer)
+    announceTimer = setTimeout(() => (announcement.value = ''), 2000)
+  },
+  { flush: 'post' },
+)
+watch(() => chat.state.active, () => {
+  lastSeen = { conv: chat.state.active, id: chat.state.messages[chat.state.messages.length - 1]?.id }
+  announcement.value = ''
+}, { flush: 'post' })
+onBeforeUnmount(() => clearTimeout(announceTimer))
+
 // Selected edit/delete targets belong to one conversation.
 watch(() => chat.state.active, () => {
   editingId.value = null
@@ -262,7 +306,7 @@ watch(() => chat.state.active, () => {
 <template>
   <div class="relative min-h-0 flex-1">
     <TooltipProvider :delay-duration="200">
-      <div ref="scroller" class="h-full overflow-y-auto pt-4 pb-4 [overflow-anchor:none]" @scroll="onScroll"
+      <div ref="scroller" role="log" aria-label="Messages" aria-live="off" class="h-full overflow-y-auto pt-4 pb-4 [overflow-anchor:none]" @scroll="onScroll"
         @wheel.passive="markUser" @touchmove.passive="markUser" @keydown="markUser" @pointerdown="onPointerDown">
         <div ref="content">
           <div v-if="loadingOlder" class="flex items-center justify-center gap-2 py-2 text-xs text-muted-foreground" role="status">
@@ -295,7 +339,7 @@ watch(() => chat.state.active, () => {
         class="btn btn-primary btn-sm absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full shadow-[var(--shadow-md)]"
         @click="latest"
       >
-        <ArrowDown />Jump to latest
+        <ArrowDown />{{ unreadCount > 0 ? `${unreadCount} new message${unreadCount === 1 ? '' : 's'}` : 'Jump to latest' }}
       </button>
     </Transition>
 
@@ -312,11 +356,14 @@ watch(() => chat.state.active, () => {
       </button>
     </Transition>
 
+    <!-- Announces messages from others as they arrive (the log itself stays quiet so opening a chat isn't read out) -->
+    <div class="sr-only" aria-live="polite" role="status">{{ announcement }}</div>
+
     <MessageSheet />
     <ForwardDialog />
     <ImageViewer />
     <ConfirmDialog
-      v-model:open="confirmOpen" title="Delete message?" confirm-label="Delete"
+      v-model:open="confirmOpen" refocus title="Delete message?" confirm-label="Delete"
       description="This removes the message for everyone in the conversation. Tip: hold Shift while clicking delete to skip this prompt."
       @confirm="confirmDelete"
     />

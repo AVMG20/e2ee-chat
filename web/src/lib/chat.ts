@@ -17,7 +17,7 @@ export const chat = {
    *   typing (conv → user IDs typing now), firstUnread (id of the first unread message when the active conv was opened),
    *   hasOlder (more messages before state.messages), highlight (message to scroll to), reads (active conv: user ID →
    *   ts of the newest message they've read; my message is "seen" by them if its ts <= that), blocked (users I blocked),
-   *   settings { readReceipts }, starred ("<conv> <msg id>" → true; use isStarred). Conversations have muted (right now),
+   *   settings { readReceipts, groupMentions }, starred ("<conv> <msg id>" → true; use isStarred). Conversations have muted (right now),
    *   mutedUntil, mentionsOnly, pinned, archived; contacts and account have avatar (URL or null).
    *   My messages with status 'sending' are queued (e.g. while offline) and go out after reconnecting;
    *   'failed' ones can be sent again with retryMessage.
@@ -61,6 +61,8 @@ export const chat = {
   setStatus: engine.setStatus,
   /** Set my display name ('' to use my username again). Sent encrypted to my contacts. state.account.displayName. */
   setDisplayName: engine.setDisplayName,
+  /** Set my status text (max 128 chars, '' clears it). Sent encrypted to my contacts; state.account.note, contact.note. */
+  setStatusText: engine.setStatusText,
   /** Readable name of this device ("Firefox on Linux"). */
   deviceName: engine.deviceName,
 
@@ -104,6 +106,17 @@ export const chat = {
   typing: engine.typing,
   /** Tell the engine whether the open chat is on screen (not the friends view or the chat list on a phone). */
   setConvVisible: engine.setConvVisible,
+  /**
+   * Tell the engine whether the open chat is scrolled to its newest message. While it isn't, new messages
+   * stay unread (conversation.unread / mentions grow, no read receipt); back at the bottom they're read.
+   */
+  setAtBottom: engine.setAtBottom,
+  /** The conversation that was open last on this device (reopen it after a restart), or null. */
+  lastConversation: engine.lastConversation,
+  /** Unsent drafts saved on this device: { [convId]: tiptap doc }. */
+  loadDrafts: engine.loadDrafts,
+  /** Save all unsent drafts on this device (debounced). Deleted on sign-out. */
+  saveDrafts: engine.saveDrafts,
   /** Is this message (still) in the conversation on this device? */
   hasMessage: engine.hasMessage,
   /** Does this message mention me (@username or @display name) or reply to one of my messages? */
@@ -148,6 +161,10 @@ export const chat = {
   shouldNotify: engine.shouldNotify,
   /** Turn read receipts (others seeing that I read their messages) on or off. state.settings.readReceipts. */
   setReadReceipts: engine.setReadReceipts,
+  /** New groups start as "mentions only" for notifications (synced). state.settings.groupMentions. */
+  setGroupMentionsDefault: engine.setGroupMentionsDefault,
+  /** A group's title: its name, or its members' names ("bob, carol") when it has none. Groups can be created without a name. */
+  groupTitle: engine.groupTitle,
   /**
    * Set (File/Blob) or remove (null) my profile picture: setAvatar(file, { x, y, size }) with the square to keep,
    * in the image's own pixels (default: the middle). Sent encrypted to my contacts.
@@ -158,6 +175,8 @@ export const chat = {
   /**
    * Search the history on this device: all words must match. Newest first. Open a hit with open(hit.conv, hit.msg.id).
    * search(query, { conv }) searches one conversation only; { limit } caps the hits (default 50).
+   * Filters in the query: from:name / from:me, has:image|video|file|link, before:/after:/on: a date
+   * (2026-11-19, 19-11-2026, today, yesterday). Names with spaces in quotes: from:"bob smith".
    */
   search: engine.search,
   /** Send one of my failed messages again. */

@@ -21,7 +21,7 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { addMembersGroup, renameGroupId } from '@/lib/nav'
-import { MUTE_OPTIONS, copyText, friendsOpen, muteFor, panelUser, setPrefs, sidePanel, starredScope, trustNewKey, type SidePanel as PanelName } from '@/lib/ui'
+import { MUTE_OPTIONS, copyText, friendsOpen, muteFor, panelUser, setPrefs, sidePanel, starredScope, statusLine, trustNewKey, type SidePanel as PanelName } from '@/lib/ui'
 
 defineEmits<{ back: [] }>()
 
@@ -163,7 +163,7 @@ async function leave() {
           <h1 class="truncate text-[15px] font-bold">{{ conv.title }}</h1>
           <button v-if="group && isAdmin" class="self-center text-muted-foreground hover:text-foreground" title="Rename group" aria-label="Rename group" @click="renameGroupId = group.id"><Pencil class="size-3.5" /></button>
           <ShieldCheck v-if="contact?.verified" class="size-4 shrink-0 self-center text-success" title="Verified" />
-          <span v-if="contact?.friend" class="hidden truncate text-xs text-muted-foreground sm:inline">{{ contact.online ? 'Online' : 'Offline' }}</span>
+          <span v-if="contact?.friend" class="hidden truncate text-xs text-muted-foreground sm:inline">{{ statusLine(contact) }}</span>
           <button v-else-if="group" class="truncate text-xs text-muted-foreground hover:text-foreground hover:underline" @click="showMembers">{{ group.members.length }} members</button>
         </div>
 
@@ -256,7 +256,7 @@ async function leave() {
         <ConfirmDialog
           v-model:open="leaveOpen"
           title="Leave group?"
-          :description="`You will stop receiving messages from ${group.name}.`"
+          :description="`You will stop receiving messages from ${conv?.title ?? group.name}.`"
           confirm-label="Leave group"
           :loading="busy"
           @confirm="leave"

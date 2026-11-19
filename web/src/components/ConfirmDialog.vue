@@ -4,14 +4,16 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 
-defineProps<{ title: string; description: string; confirmLabel: string; loading?: boolean }>()
+import { refocusComposer } from '@/components/messages/state'
+
+const props = defineProps<{ title: string; description: string; confirmLabel: string; loading?: boolean; refocus?: boolean }>()
 const open = defineModel<boolean>('open', { required: true })
 defineEmits<{ confirm: [] }>()
 </script>
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent>
+    <DialogContent @close-auto-focus="(e: Event) => { if (props.refocus) { e.preventDefault(); refocusComposer() } }">
       <DialogHeader>
         <div class="mb-2 flex size-11 items-center justify-center rounded-full bg-destructive/15 text-destructive">
           <TriangleAlert class="size-5" />

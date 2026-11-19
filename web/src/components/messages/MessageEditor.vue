@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount } from 'vue'
+import { nextTick, onBeforeUnmount } from 'vue'
 import { Extension } from '@tiptap/core'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import { toast } from 'vue-sonner'
@@ -10,13 +10,16 @@ import { errMsg } from '@/lib/format'
 import { isEmptyDoc } from '@/lib/render'
 import type { ChatMessage } from '@/lib/types'
 import { codeFenceShortcut } from './codefence'
-import { editingId } from './state'
+import { coarsePointer, editingId, refocusComposer } from './state'
 
 const props = defineProps<{ msg: ChatMessage }>()
 let saving = false
+const coarse = coarsePointer()
 
 function cancel() {
-  if (editingId.value === props.msg.id) editingId.value = null
+  if (editingId.value !== props.msg.id) return
+  editingId.value = null
+  void nextTick(refocusComposer)
 }
 
 async function save() {
@@ -47,6 +50,8 @@ const Keys = Extension.create({
       Enter: () => {
         if (this.editor.isActive('codeBlock')) return false
         if (codeFenceShortcut(this.editor)) return true
+        // Phones: Enter is a newline; the Save link below saves.
+        if (coarsePointer()) return false
         void save()
         return true
       },
@@ -69,8 +74,14 @@ onBeforeUnmount(() => editor.value?.destroy())
   <div>
     <EditorContent :editor="editor" class="max-h-60 overflow-y-auto rounded-md bg-composer px-3 py-2 text-[15px] [&_pre]:rounded-md [&_pre]:border [&_pre]:border-line [&_pre]:bg-inset [&_pre]:font-mono [&_pre]:text-[13px] focus-within:shadow-[var(--glow)]" />
     <p class="mt-1 text-xs text-muted-foreground">
-      escape to <button class="text-[var(--link)] hover:underline" @click="cancel">cancel</button>
-      · enter to <button class="text-[var(--link)] hover:underline" @click="save">save</button>
+      <template v-if="coarse">
+        <button class="text-[var(--link)] hover:underline" @click="cancel">cancel</button>
+        · <button class="text-[var(--link)] hover:underline" @click="save">save</button>
+      </template>
+      <template v-else>
+        escape to <button class="text-[var(--link)] hover:underline" @click="cancel">cancel</button>
+        · enter to <button class="text-[var(--link)] hover:underline" @click="save">save</button>
+      </template>
     </p>
   </div>
 </template>

@@ -3,7 +3,7 @@ import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
 import { errMsg, formatClock } from '@/lib/format'
 import { addMembersGroup, friendsTab, pendingAction, renameGroupId, showConv, view } from '@/lib/nav'
-import type { Contact, Conversation, ConvId } from '@/lib/types'
+import type { Account, Contact, Conversation, ConvId } from '@/lib/types'
 
 /** Legacy trigger: setting this to true opens the Friends view (ChatLayout resets it). */
 export const friendsOpen = ref(false)
@@ -13,6 +13,12 @@ export type SettingsSection = 'account' | 'privacy' | 'notifications' | 'appeara
 /** Last opened settings section, kept while the app runs. */
 export const settingsSection = ref<SettingsSection>('account')
 export const paletteOpen = ref(false)
+/** The "Keyboard shortcuts" dialog. */
+export const shortcutsOpen = ref(false)
+/** The "Set a custom status" dialog. */
+export const statusTextOpen = ref(false)
+/** Shown in shortcut hints: ⌘ on Apple platforms, Ctrl elsewhere. */
+export const isMac = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.platform)
 /** Right-hand panel of the conversation view; stays open when switching chats. */
 export type SidePanel = 'info' | 'search' | 'media' | 'starred'
 export const sidePanel = ref<SidePanel | null>(null)
@@ -33,6 +39,8 @@ watch(() => chat.state.account?.id, (id, prev) => {
   addMembersGroup.value = null
   renameGroupId.value = null
   paletteOpen.value = false
+  shortcutsOpen.value = false
+  statusTextOpen.value = false
   accountOpen.value = false
 })
 
@@ -48,12 +56,24 @@ export function friendState(id: string): FriendState {
   return 'none'
 }
 
+/** Readable status name for a status dot ("Offline" also covers invisible). */
+export function statusLabel(status: Contact['status'] | Account['status'] | undefined): string {
+  return status === 'online' ? 'Online' : status === 'away' ? 'Away' : status === 'dnd' ? 'Do not disturb' : 'Offline'
+}
+
+/** "Away · in a meeting": the status name, plus their status text when they set one. */
+export function statusLine(c: Pick<Contact, 'status' | 'note'>): string {
+  return c.note ? `${statusLabel(c.status)} · ${c.note}` : statusLabel(c.status)
+}
+
 /** Sends a friend request and toasts the right outcome (it auto-accepts if they had already asked). Throws on failure. */
 export async function sendFriendRequestToast(id: string, name?: string) {
   const wasIncoming = friendState(id) === 'incoming'
   await chat.sendFriendRequest(id)
-  const n = name ?? chat.displayName(id)
-  toast.success(wasIncoming || chat.state.contacts[id]?.friend ? `You're now friends with ${n}` : `Friend request sent to ${n}`)
+  // Never show a raw ID: use the name when we know one.
+  const known = name || chat.state.contacts[id]?.name
+  if (wasIncoming || chat.state.contacts[id]?.friend) toast.success(known ? `You're now friends with ${known}` : "You're now friends")
+  else toast.success(known ? `Friend request sent to ${known}` : 'Friend request sent')
 }
 
 /** Click on a person: me opens account settings, anyone else opens their profile in the Info panel. */
@@ -69,6 +89,15 @@ export function openUser(id: string) {
 
 /** Starred panel: only the open chat, or every chat. */
 export const starredScope = ref<'chat' | 'all'>('chat')
+
+/** Opens the starred messages of every chat (full screen on phones). */
+export function openStarredAll() {
+  accountOpen.value = false
+  view.value = 'chats'
+  showConv.value = true
+  starredScope.value = 'all'
+  sidePanel.value = 'starred'
+}
 
 /** Below lg the panel covers the conversation, so close it after jumping to a message. */
 export function closePanelOnNarrow() {

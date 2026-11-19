@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { CornerUpLeft, Copy, Forward, Pencil, Plus, RotateCw, Star, Trash2 } from 'lucide-vue-next'
+import { CornerUpLeft, Copy, Download, Forward, ImageDown, Link2, Pencil, Plus, Quote, RotateCw, Star, Trash2 } from 'lucide-vue-next'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import EmojiGrid from '@/components/messages/EmojiGrid.vue'
 import { QUICK_EMOJI } from '@/components/messages/emoji'
-import { canDeleteMsg, canEditMsg, canForward, deleteTarget, editingId, forwardMsg, reactTo, replyTo, retry, sheetMsg, toggleStar } from '@/components/messages/state'
+import { copyImage, saveImage } from '@/components/messages/imageActions'
+import { canDeleteMsg, composerApi, canEditMsg, canForward, deleteTarget, editingId, forwardMsg, reactTo, replyTo, retry, sheetMsg, toggleStar } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
+import { messageLink } from '@/lib/links'
 import { copyText } from '@/lib/ui'
 
 /** Bottom sheet with message actions, opened by long-press on touch devices. */
@@ -20,6 +22,7 @@ const more = ref(false)
 watch(open, (o) => o && (more.value = false))
 
 const canCopy = computed(() => msg.value?.kind === 'text')
+const isImage = computed(() => !!msg.value && msg.value.kind === 'file' && chat.isImage(msg.value))
 
 /** Runs an action on the open message, then closes the sheet. */
 function run(fn: (m: NonNullable<typeof msg.value>) => void) {
@@ -61,6 +64,10 @@ const row = 'flex h-12 w-full items-center gap-3 rounded-md px-3 text-left text-
           <button type="button" :class="row" @click="run(toggleStar)"><Star :class="chat.isStarred(msg) && 'fill-current'" />{{ chat.isStarred(msg) ? 'Unstar' : 'Star' }}</button>
         </template>
         <button v-if="canCopy" type="button" :class="row" @click="run((m) => copyText(chat.copyText(m), 'Copied'))"><Copy />Copy text</button>
+        <button v-if="canCopy && msg.status !== 'failed' && msg.status !== 'sending'" type="button" :class="row" @click="run((m) => composerApi.quote?.(chat.copyText(m)))"><Quote />Quote</button>
+        <button v-if="isImage" type="button" :class="row" @click="run(copyImage)"><ImageDown />Copy image</button>
+        <button v-if="isImage" type="button" :class="row" @click="run(saveImage)"><Download />Save image</button>
+        <button v-if="msg.status !== 'failed' && msg.status !== 'sending'" type="button" :class="row" @click="run((m) => copyText(messageLink(m.conv, m.id), 'Link copied'))"><Link2 />Copy message link</button>
         <button v-if="canEditMsg(msg)" type="button" :class="row" @click="run((m) => (editingId = m.id))"><Pencil />Edit message</button>
         <button
           v-if="canDeleteMsg(msg)" type="button" :class="[row, 'text-destructive [&_svg]:!text-destructive']"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { Extension } from '@tiptap/core'
 import { Placeholder } from '@tiptap/extensions'
@@ -10,14 +10,18 @@ import {
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import EmojiPicker from '@/components/messages/EmojiPicker.vue'
-import { drafts, extra, myId, queues, replyTo, sendTyping, startEditLast, type Queued } from '@/components/messages/state'
+import {
+  coarsePointer, composerApi, drafts, draftsReady, extra, myId, queues, replyTo, requestScroll, sendTyping, startEditLast, type Queued,
+} from '@/components/messages/state'
 import { codeFenceShortcut } from '@/components/messages/codefence'
 import { chat } from '@/lib/chat'
+import { addRecent, codeFor, emojiData, loadEmoji, searchEmoji } from '@/lib/emoji'
 import { fencesToCodeBlocks } from '@/lib/code/fences'
 import { editorExtensions } from '@/lib/editor'
 import { errMsg, formatSize } from '@/lib/format'
 import { isEmptyDoc } from '@/lib/render'
 import { MAX_FILE_BYTES } from '@/lib/types'
+import { sidePanel } from '@/lib/ui'
 import type { ConvId } from '@/lib/types'
 
 const props = defineProps<{ disabled?: boolean }>()
@@ -31,6 +35,7 @@ const linkUrl = ref('')
 const queue = ref<Queued[]>([])
 let nextKey = 1
 
+const coarse = coarsePointer()
 const canSend = computed(() => !empty.value || queue.value.length > 0)
 const replyName = computed(() => (replyTo.value ? (replyTo.value.from === myId() ? 'yourself' : chat.displayName(replyTo.value.from)) : ''))
 const replyPreview = computed(() => (replyTo.value ? chat.previewText(replyTo.value) : ''))
@@ -152,6 +157,57 @@ function pickMention(i = mentionIdx.value) {
   return true
 }
 
+// ---------- :emoji: shortcodes ----------
+const emojiPop = ref<{ query: string; from: number; to: number } | null>(null)
+const emojiIdx = ref(0)
+
+const emojiCandidates = computed(() => {
+  const q = emojiPop.value?.query
+  const data = emojiData.value
+  if (!q || !data) return []
+  return searchEmoji(data, q, 8).map((it) => ({ e: it.e, code: codeFor(it, q) }))
+})
+watch(emojiCandidates, () => (emojiIdx.value = 0))
+
+/** Looks at the text before the cursor: ":sm" opens the suggestions, a finished ":smile:" becomes the emoji. */
+function updateEmoji() {
+  const ed = editor.value
+  emojiPop.value = null
+  if (!ed) return
+  const { $from, empty: collapsed } = ed.state.selection
+  if (!collapsed || $from.parent.type.name === 'codeBlock' || $from.marks().some((m) => m.type.name === 'code')) return
+  const before = $from.parent.textBetween(0, $from.parentOffset, undefined, '￼')
+  const m = /(?:^|[\s(])(:([a-z0-9_+-]{1,32}):?)$/i.exec(before)
+  if (!m) return
+  const typed = m[1]!
+  const name = m[2]!
+  const from = $from.pos - typed.length
+  if (typed.endsWith(':')) {
+    void loadEmoji().then((d) => {
+      const e = d.byCode.get(name.toLowerCase())
+      // Still the same text under the cursor? Then swap ":name:" for the emoji.
+      if (e && editor.value?.state.selection.from === $from.pos && editor.value.state.doc.textBetween(from, $from.pos) === typed) {
+        editor.value.chain().insertContentAt({ from, to: $from.pos }, e).run()
+        addRecent(e)
+      }
+    }).catch(() => {})
+    return
+  }
+  if (name.length < 2) return
+  emojiPop.value = { query: name, from, to: $from.pos }
+  if (!emojiData.value) void loadEmoji().then(() => updateEmoji()).catch(() => {})
+}
+
+function pickEmoji(i = emojiIdx.value) {
+  const p = emojiPop.value
+  const c = emojiCandidates.value[i]
+  if (!p || !c) return false
+  editor.value?.chain().focus().insertContentAt({ from: p.from, to: p.to }, c.e).run()
+  addRecent(c.e)
+  emojiPop.value = null
+  return true
+}
+
 // ---------- typing indicator ----------
 const typingNames = computed(() => {
   const id = chat.state.active
@@ -172,36 +228,50 @@ const Keys = Extension.create({
   priority: 1000,
   addKeyboardShortcuts() {
     const menu = () => mention.value && candidates.value.length > 0
+    const emojiMenu = () => emojiPop.value && emojiCandidates.value.length > 0
     return {
       Enter: () => {
         if (menu() && pickMention()) return true
+        if (emojiMenu() && pickEmoji()) return true
         // In a code block Enter is a newline; Ctrl/Cmd+Enter or the button sends.
         if (this.editor.isActive('codeBlock')) return false
         if (codeFenceShortcut(this.editor)) return true
+        // Phones: Enter is a newline (the default Enter behaviour); the Send button sends.
+        if (coarsePointer()) return false
         void send()
         return true
       },
       'Mod-Enter': () => (void send(), true),
-      Tab: () => (menu() ? pickMention() : false),
+      Tab: () => (menu() ? pickMention() : emojiMenu() ? pickEmoji() : false),
       ArrowUp: () => {
         if (menu()) {
           mentionIdx.value = (mentionIdx.value + candidates.value.length - 1) % candidates.value.length
+          return true
+        }
+        if (emojiMenu()) {
+          emojiIdx.value = (emojiIdx.value + emojiCandidates.value.length - 1) % emojiCandidates.value.length
           return true
         }
         if (empty.value && !queue.value.length && !props.disabled) return startEditLast()
         return false
       },
       ArrowDown: () => {
-        if (!menu()) return false
-        mentionIdx.value = (mentionIdx.value + 1) % candidates.value.length
+        if (menu()) mentionIdx.value = (mentionIdx.value + 1) % candidates.value.length
+        else if (emojiMenu()) emojiIdx.value = (emojiIdx.value + 1) % emojiCandidates.value.length
+        else return false
         return true
       },
       Escape: () => {
         if (mention.value) mention.value = null
+        else if (emojiPop.value) emojiPop.value = null
         else if (replyTo.value) replyTo.value = null
-        else return false
+        // An open side panel closes first (ProseMirror swallows Esc, so ConversationPane never sees it).
+        else if (sidePanel.value) sidePanel.value = null
+        else requestScroll('bottom') // jump to the newest message (which also marks it read)
         return true
       },
+      PageUp: () => (requestScroll('up'), true),
+      PageDown: () => (requestScroll('down'), true),
     }
   },
 })
@@ -214,9 +284,13 @@ const editor = useEditor({
     empty.value = isEmptyDoc(doc)
     if (!empty.value) sendTyping()
     updateMention()
+    updateEmoji()
+    // Keep the draft up to date (saved on this device too).
+    const conv = chat.state.active
+    if (conv && chat.state.account) drafts.set(conv, { doc: empty.value ? null : doc, reply: replyTo.value })
   },
-  onSelectionUpdate: updateMention,
-  onBlur: () => setTimeout(() => (mention.value = null), 150),
+  onSelectionUpdate: () => (updateMention(), updateEmoji()),
+  onBlur: () => setTimeout(() => (mention.value = emojiPop.value = null), 150),
   editorProps: {
     attributes: { class: 'composer-editor prose-like', 'aria-label': 'Message' },
     handlePaste: (_view, event) => {
@@ -247,6 +321,7 @@ function restore(now: ConvId | null) {
   queue.value = (now && queues.get(now)) || []
   empty.value = isEmptyDoc(ed.getJSON())
   mention.value = null
+  emojiPop.value = null
   if (now) ed.commands.focus('end')
 }
 watch(
@@ -263,6 +338,16 @@ watch(
 )
 // On mount (e.g. coming back from the Friends view) restore the draft once the editor exists.
 watch(editor, (ed) => ed && restore(chat.state.active), { immediate: true })
+// Saved drafts arrive a moment after sign-in: fill an untouched message box with the open chat's draft.
+watch(draftsReady, (ready) => {
+  const ed = editor.value
+  const conv = chat.state.active
+  if (!ready || !ed || !conv || !empty.value) return
+  const doc = drafts.get(conv)?.doc
+  if (!doc) return
+  ed.commands.setContent(doc as object, { emitUpdate: false })
+  empty.value = isEmptyDoc(ed.getJSON())
+})
 
 // Signing out drops queued files too (state.ts clears the text drafts).
 watch(() => chat.state.account, (a) => {
@@ -288,11 +373,29 @@ function onWindowKey(e: KeyboardEvent) {
   // A space or a key on a focused button means "press it", not "type".
   if (printable && e.key === ' ' && t?.closest('button, a, [role=button]')) return
   if (document.querySelector('[role=dialog], [role=menu]')) return
+  // Focus right now so this key's character lands in the box: Tiptap's focus() only focuses on the
+  // next animation frame outside Safari, which would drop the first letter(s) in Chromium.
+  ed.view.dom.focus({ preventScroll: true })
   ed.commands.focus('end')
 }
 window.addEventListener('keydown', onWindowKey)
 
+composerApi.focus = () => editor.value?.commands.focus('end')
+/** Quote: a blockquote of the given text followed by an empty paragraph to write the answer in. */
+composerApi.quote = (text) => {
+  const ed = editor.value
+  if (!ed || props.disabled) return
+  const lines = text.trim().slice(0, 2000).split('\n')
+  // Spoilers come back as ||text|| (see plaintext.ts): keep them hidden in the quote too.
+  const inline = (l: string) => l.split(/\|\|([^|]+?)\|\|/).flatMap((part, i) =>
+    !part ? [] : i % 2 ? [{ type: 'text', text: part, marks: [{ type: 'spoiler' }] }] : [{ type: 'text', text: part }])
+  const quote = { type: 'blockquote', content: lines.map((l) => (inline(l).length ? { type: 'paragraph', content: inline(l) } : { type: 'paragraph' })) }
+  ed.chain().focus('end').insertContent([quote, { type: 'paragraph' }]).run()
+  void nextTick(() => ed.commands.focus('end'))
+}
+
 onBeforeUnmount(() => {
+  composerApi.focus = composerApi.quote = null
   window.removeEventListener('keydown', onWindowKey)
   const ed = editor.value
   const id = chat.state.active
@@ -363,7 +466,22 @@ const tools: Tool[] = [
   <div class="relative">
     <!-- @mention suggestions -->
     <ul
-      v-if="candidates.length" role="listbox" aria-label="Mention a member"
+      v-if="emojiCandidates.length" role="listbox" aria-label="Emoji suggestions"
+      class="dialog absolute right-0 bottom-full left-0 z-20 mb-1.5 overflow-hidden rounded-lg p-1 text-sm"
+    >
+      <li v-for="(c, i) in emojiCandidates" :key="c.e" role="option" :aria-selected="i === emojiIdx">
+        <button
+          type="button" class="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left"
+          :class="i === emojiIdx ? 'bg-active' : 'hover:bg-hover'" @mousedown.prevent="pickEmoji(i)"
+        >
+          <span class="w-6 text-center text-xl leading-none">{{ c.e }}</span>
+          <span class="min-w-0 flex-1 truncate font-medium">:{{ c.code }}:</span>
+        </button>
+      </li>
+    </ul>
+
+    <ul
+      v-else-if="candidates.length" role="listbox" aria-label="Mention a member"
       class="dialog absolute right-0 bottom-full left-0 z-20 mb-1.5 overflow-hidden rounded-lg p-1 text-sm"
     >
       <li v-for="(c, i) in candidates" :key="c.id" role="option" :aria-selected="i === mentionIdx">
@@ -448,7 +566,7 @@ const tools: Tool[] = [
         <button
           type="button" class="btn btn-ghost btn-icon shrink-0 !size-10 transition-colors"
           :class="canSend && !disabled && '!text-primary hover:!bg-primary/15'"
-          title="Send (Enter)" aria-label="Send" :aria-disabled="!canSend" :disabled="disabled || sending" @click="send"
+          :title="coarse ? 'Send' : 'Send (Enter)'" aria-label="Send" :aria-disabled="!canSend" :disabled="disabled || sending" @click="send"
         >
           <SendHorizontal />
         </button>

@@ -10,13 +10,16 @@ import Rail from '@/components/Rail.vue'
 import Sidebar from '@/components/Sidebar.vue'
 import CommandPalette from '@/components/shell/CommandPalette.vue'
 import FriendsView from '@/components/shell/FriendsView.vue'
+import ShortcutsDialog from '@/components/shell/ShortcutsDialog.vue'
+import StatusTextDialog from '@/components/shell/StatusTextDialog.vue'
 import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
-import { addMembersGroup, openFriends, pendingAction, renameGroupId, showChats, showConv, view } from '@/lib/nav'
+import { addMembersGroup, openConversation, openFriends, pendingAction, renameGroupId, showChats, showConv, sidebarOrder, view } from '@/lib/nav'
+import { openMessageLink, parseMessageLink } from '@/lib/links'
 import { startNotifications } from '@/lib/notify'
 import { checkForUpdate } from '@/lib/desktop'
-import { accountOpen, friendsOpen, paletteOpen } from '@/lib/ui'
+import { accountOpen, friendsOpen, paletteOpen, shortcutsOpen, sidePanel, statusTextOpen } from '@/lib/ui'
 
 // On narrow screens only one of sidebar / main area is visible (see showConv in lib/nav).
 const pwOpen = ref(false)
@@ -68,13 +71,13 @@ const confirmCopy = computed(() => {
     return { title: `Remove ${chat.displayName(p.id)}?`, description: 'You will no longer be able to message each other until you are friends again.', label: 'Remove friend' }
   }
   if (p?.kind === 'leave') {
-    return { title: `Leave ${chat.state.groups[p.id]?.name ?? 'group'}?`, description: 'You will stop receiving messages from this group.', label: 'Leave group' }
+    return { title: `Leave ${chat.groupTitle(p.id)}?`, description: 'You will stop receiving messages from this group.', label: 'Leave group' }
   }
   if (p?.kind === 'block') {
     return { title: `Block ${chat.displayName(p.id)}?`, description: "They won't be able to message you or send friend requests. They won't be told.", label: 'Block' }
   }
   if (p?.kind === 'kick') {
-    return { title: `Remove ${chat.displayName(p.id)}?`, description: `They will be removed from ${chat.state.groups[p.group]?.name ?? 'the group'} and stop receiving its messages.`, label: 'Remove from group' }
+    return { title: `Remove ${chat.displayName(p.id)}?`, description: `They will be removed from ${chat.groupTitle(p.group)} and stop receiving its messages.`, label: 'Remove from group' }
   }
   return { title: '', description: '', label: '' }
 })
@@ -108,8 +111,51 @@ const renameOpen = computed({
   set: (v) => { if (!v) renameGroupId.value = null },
 })
 
+/** A dialog or menu is open: navigation shortcuts should leave the keys alone. */
+const modalOpen = () => !!document.querySelector('[role="dialog"], [role="alertdialog"]')
+
+/**
+ * Alt+↑/↓ steps through the sidebar's conversations; with Shift it only visits ones with unread
+ * messages (and wraps around).
+ */
+function stepConversation(dir: 1 | -1, unreadOnly: boolean) {
+  const list = sidebarOrder()
+  if (!list.length) return
+  const at = list.findIndex((c) => c.id === chat.state.active)
+  if (!unreadOnly) {
+    const next = list[at < 0 ? (dir === 1 ? 0 : list.length - 1) : at + dir]
+    if (next) void openConversation(next.id).catch((e) => toast.error(errMsg(e)))
+    return
+  }
+  for (let i = 1; i <= list.length; i++) {
+    const c = list[(((at < 0 ? (dir === 1 ? -1 : list.length) : at) + dir * i) % list.length + list.length) % list.length]!
+    if (c.unread > 0 && c.id !== chat.state.active) {
+      void openConversation(c.id).catch((e) => toast.error(errMsg(e)))
+      return
+    }
+  }
+}
+
 function onKey(e: KeyboardEvent) {
-  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
+  const mod = (e.ctrlKey || e.metaKey) && !e.altKey
+  if (mod && !e.shiftKey && e.key === '/') {
+    e.preventDefault()
+    shortcutsOpen.value = !shortcutsOpen.value
+  } else if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    if (modalOpen() || accountOpen.value || e.isComposing) return
+    // In the message box it switches chats (like Slack/Discord); in other text fields (search, editing a
+    // message) Alt+↑/↓ keeps its normal meaning (on a Mac: to the start/end of the text).
+    const t = e.target as HTMLElement | null
+    if (t?.closest('input, textarea, select, [contenteditable="true"]') && !t.closest('.composer-editor[aria-label="Message"]')) return
+    e.preventDefault()
+    stepConversation(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey)
+  } else if (mod && !e.shiftKey && e.key.toLowerCase() === 'f') {
+    // Search in the open chat; without one, leave the browser's own find alone.
+    if (!chat.state.active || accountOpen.value || view.value !== 'chats' || modalOpen()) return
+    e.preventDefault()
+    if (sidePanel.value === 'search') document.querySelector<HTMLInputElement>('input[aria-label="Search this chat"]')?.select()
+    else sidePanel.value = 'search'
+  } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
     e.preventDefault()
     paletteOpen.value = !paletteOpen.value
   } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ',') {
@@ -119,9 +165,54 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
+/** Resolves once `cond` holds, or after `ms`. */
+function waitFor(cond: () => boolean, ms: number): Promise<void> {
+  if (cond()) return Promise.resolve()
+  return new Promise((resolve) => {
+    const stop = watch(cond, (ok) => ok && done())
+    const timer = setTimeout(done, ms)
+    function done() {
+      stop()
+      clearTimeout(timer)
+      resolve()
+    }
+  })
+}
+
+/** A link to a message (<server>/#/m/<chat>/<id>) in the address bar: open it and tidy the address. Resolves true if it was one. */
+async function openLinkFromHash(): Promise<boolean> {
+  const target = parseMessageLink(location.href)
+  if (!target) return false
+  history.replaceState(null, '', location.pathname + location.search)
+  // Right after start the chats may still be loading.
+  // (A DM link made by the other person names my own id: then wait for the list to be there.)
+  const mine = target.conv === `dm:${chat.state.account?.id}`
+  await waitFor(() => chat.state.conversations.some((c) => c.id === target.conv) || (mine && !chat.state.syncing && chat.state.conversations.length > 0), 8000)
+  await openMessageLink(target)
+  return true
+}
+const onHash = () => void openLinkFromHash().catch(() => {})
+
+/** Wide screens come back to the chat that was open last on this device. */
+async function reopenLast() {
+  if (!isWide.value || chat.state.active) return
+  // The engine only knows a chat once the list has loaded, and the list fills in bit by bit: ask for a few seconds.
+  for (let i = 0; i < 20; i++) {
+    const id = await chat.lastConversation()
+    if (chat.state.active) return
+    if (id) {
+      await openConversation(id).catch(() => {})
+      return
+    }
+    await new Promise((r) => setTimeout(r, 250))
+  }
+}
+
 let stopNotifications = () => {}
 onMounted(() => {
   window.addEventListener('keydown', onKey)
+  window.addEventListener('hashchange', onHash)
+  void openLinkFromHash().then((was) => (was ? undefined : reopenLast())).catch(() => {})
   stopNotifications = startNotifications()
   if (chat.isDesktop) {
     setTimeout(() => void offerUpdate(), 5000)
@@ -158,6 +249,7 @@ async function offerUpdate() {
 onBeforeUnmount(() => {
   clearInterval(updateTimer)
   window.removeEventListener('keydown', onKey)
+  window.removeEventListener('hashchange', onHash)
   stopNotifications()
 })
 </script>
@@ -172,6 +264,8 @@ onBeforeUnmount(() => {
 
     <ChangePasswordDialog v-model:open="pwOpen" />
     <CommandPalette v-model:open="paletteOpen" />
+    <ShortcutsDialog v-model:open="shortcutsOpen" />
+    <StatusTextDialog v-model:open="statusTextOpen" />
     <AddMembersDialog v-if="membersGroup" v-model:open="membersOpen" :group="membersGroup" />
     <RenameGroupDialog v-if="renameGroup" v-model:open="renameOpen" :group="renameGroup" />
     <ConfirmDialog

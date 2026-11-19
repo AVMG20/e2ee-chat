@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue'
-import { Moon, Sun } from 'lucide-vue-next'
+import { Monitor, Moon, Sun } from 'lucide-vue-next'
 import SettingsSection from './SettingsSection.vue'
 import { formatClock, setTimeFormat, timeFormat, type TimeFormat } from '@/lib/format'
-import { isDark, toggleTheme } from '@/lib/theme'
+import { setTheme, themeChoice, type ThemeChoice } from '@/lib/theme'
 
-function pickTheme(dark: boolean) {
-  if (isDark.value !== dark) toggleTheme()
-}
+const themes: { id: ThemeChoice; label: string; icon: typeof Sun }[] = [
+  { id: 'light', label: 'Light', icon: Sun },
+  { id: 'dark', label: 'Dark', icon: Moon },
+  { id: 'system', label: 'System', icon: Monitor },
+]
 
 const clock = ref(Date.now())
 const timer = setInterval(() => (clock.value = Date.now()), 1000)
@@ -22,16 +24,13 @@ const seg = 'inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-
 
 <template>
   <div class="space-y-8">
-    <SettingsSection title="Theme">
+    <SettingsSection title="Theme" description="System follows your device and switches with it.">
       <div class="well inline-flex gap-1 rounded-lg p-1" role="radiogroup" aria-label="Theme">
         <button
-          role="radio" :aria-checked="!isDark" aria-label="Light theme" title="Light theme" :class="[seg, !isDark ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground']"
-          @click="pickTheme(false)"
-        ><Sun class="size-4" />Light</button>
-        <button
-          role="radio" :aria-checked="isDark" aria-label="Dark theme" title="Dark theme" :class="[seg, isDark ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground']"
-          @click="pickTheme(true)"
-        ><Moon class="size-4" />Dark</button>
+          v-for="t in themes" :key="t.id" role="radio" :aria-checked="themeChoice === t.id" :aria-label="`${t.label} theme`" :title="`${t.label} theme`"
+          :class="[seg, themeChoice === t.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground']"
+          @click="setTheme(t.id)"
+        ><component :is="t.icon" class="size-4" />{{ t.label }}</button>
       </div>
     </SettingsSection>
 

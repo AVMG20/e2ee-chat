@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { chat } from '@/lib/chat'
-import type { ConvId } from '@/lib/types'
+import type { Conversation, ConvId } from '@/lib/types'
 
 export type FriendsTab = 'online' | 'all' | 'pending' | 'blocked' | 'add'
 
@@ -39,3 +39,9 @@ export async function openConversation(id: ConvId, focus?: string) {
 
 /** Opens the DM with a friend. */
 export const openDm = (userId: string) => openConversation(`dm:${userId}`)
+
+/** Conversations in the order the sidebar lists them: direct messages, then groups (archived ones left out). */
+export function sidebarOrder(): Conversation[] {
+  const live = chat.state.conversations.filter((c) => !c.archived)
+  return [...live.filter((c) => c.kind === 'dm'), ...live.filter((c) => c.kind === 'group')]
+}

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Loader2, Search } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
@@ -51,6 +51,17 @@ watch(() => chat.state.messages.length, () => {
   runSearch()
 })
 onMounted(() => input.value?.focus())
+
+/** Filters the engine understands; the chips insert them at the end of the query. */
+const FILTERS = ['from:', 'has:image', 'has:file', 'has:link']
+function addFilter(f: string) {
+  query.value = query.value.trim() ? `${query.value.trimEnd()} ${f}` : f
+  void nextTick(() => {
+    const el = input.value
+    el?.focus()
+    el?.setSelectionRange(query.value.length, query.value.length)
+  })
+}
 onBeforeUnmount(() => {
   seq++
   clearTimeout(timer)
@@ -59,7 +70,7 @@ onBeforeUnmount(() => {
 /** A short excerpt around the first matching word, split into plain and matched parts. */
 function snippet(hit: SearchHit): { t: string; m: boolean }[] {
   const text = chat.previewText(hit.msg).replace(/\s+/g, ' ')
-  const terms = searched.value.toLowerCase().split(/\s+/).filter(Boolean)
+  const terms = searched.value.toLowerCase().split(/\s+/).filter((t) => t && !/^(from|has|before|after|on|during):/.test(t))
   const lower = text.toLowerCase()
   const first = Math.min(...terms.map((t) => lower.indexOf(t)).filter((i) => i >= 0), text.length)
   const start = Math.max(0, first - 24)
@@ -84,6 +95,12 @@ async function choose(h: SearchHit) {
       <Search />
       <input ref="input" v-model="query" class="field" placeholder="Search this chat" aria-label="Search this chat" autocomplete="off" spellcheck="false">
     </div>
+    <div v-if="!query.trim()" class="flex flex-wrap gap-1.5" aria-label="Search filters">
+      <button v-for="f in FILTERS" :key="f" class="rounded-full bg-soft px-2.5 py-1 font-mono text-xs text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:shadow-[var(--glow)]" @click="addFilter(f)">{{ f }}</button>
+    </div>
+    <p class="px-0.5 text-[11px] leading-relaxed text-muted-foreground">
+      Filter with <code class="font-mono">from:name</code>, <code class="font-mono">has:image</code>, <code class="font-mono">before:2026-11-19</code>, <code class="font-mono">after:yesterday</code>.
+    </p>
     <div v-if="searching && !hits.length" class="flex justify-center p-4"><Loader2 class="size-4 animate-spin text-muted-foreground" /></div>
     <p v-else-if="query.trim() && !searching && !hits.length" class="p-3 text-center text-sm text-muted-foreground">No messages found.</p>
     <p v-else-if="!query.trim()" class="p-3 text-center text-sm text-muted-foreground">Type to search the messages in this chat.</p>

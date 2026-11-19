@@ -6,16 +6,12 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { chat } from '@/lib/chat'
 import { showChats, openFriends, view } from '@/lib/nav'
 import { isDark, toggleTheme } from '@/lib/theme'
-import { accountOpen, sidePanel, starredScope } from '@/lib/ui'
+import { accountOpen, openStarredAll } from '@/lib/ui'
 
-function openStarred() {
-  accountOpen.value = false
-  view.value = 'chats'
-  starredScope.value = 'all'
-  sidePanel.value = 'starred'
-}
 const incoming = computed(() => chat.state.requests.incoming.length)
-const unread = computed(() => chat.state.conversations.reduce((n, c) => (c.muted ? n : n + c.unread), 0))
+/** Something worth a glance: unread in a normal chat, or a mention anywhere. */
+const unread = computed(() => chat.state.conversations.some((c) => (c.mentions > 0) || (!c.muted && !c.mentionsOnly && c.unread > 0)))
+const mentioned = computed(() => chat.state.conversations.some((c) => c.mentions > 0))
 </script>
 
 <template>
@@ -27,7 +23,7 @@ const unread = computed(() => chat.state.conversations.reduce((n, c) => (c.muted
       <RailButton label="Chats" :active="!accountOpen && view === 'chats'" @click="accountOpen = false; showChats()">
         <MessageSquare class="size-5" :fill="view === 'chats' ? 'currentColor' : 'none'" />
         <template #badge>
-          <span v-if="unread" class="absolute -right-1 -bottom-1 size-3 rounded-full bg-destructive ring-[3px] ring-[var(--rail)]" />
+          <span v-if="unread" class="absolute -right-1 -bottom-1 size-3 rounded-full ring-[3px] ring-[var(--rail)]" :class="mentioned ? 'bg-destructive' : 'bg-primary'" />
         </template>
       </RailButton>
       <RailButton label="Friends" :active="!accountOpen && view === 'friends'" @click="accountOpen = false; openFriends()">
@@ -37,7 +33,7 @@ const unread = computed(() => chat.state.conversations.reduce((n, c) => (c.muted
         </template>
       </RailButton>
 
-      <RailButton label="Starred messages" @click="openStarred"><Star class="size-5" /></RailButton>
+      <RailButton label="Starred messages" @click="openStarredAll"><Star class="size-5" /></RailButton>
 
       <div class="flex-1" />
 

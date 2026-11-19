@@ -34,10 +34,10 @@ watch(
   <div v-if="isImage()" class="mt-1">
     <button
       v-if="url"
-      class="group/img relative block cursor-zoom-in overflow-hidden rounded-lg bg-inset outline-none focus-visible:shadow-[var(--glow)]"
+      class="group/img relative block w-fit cursor-zoom-in overflow-hidden rounded-lg bg-inset outline-none focus-visible:shadow-[var(--glow)]" style="max-width: min(400px, 100%)"
       :aria-label="`Open ${file().name}`" @click="viewerId = msg.id"
     >
-      <img :src="url" :alt="file().name" class="block max-h-80 min-h-12 min-w-12 object-contain" style="max-width: min(400px, 100%)">
+      <img :src="url" :alt="file().name" class="block h-auto max-h-80 min-h-12 w-auto max-w-full min-w-12 object-contain">
       <span class="absolute top-2 right-2 flex size-7 items-center justify-center rounded-md bg-black/50 text-white opacity-0 transition-opacity group-hover/img:opacity-100"><Maximize2 class="size-3.5" /></span>
     </button>
     <div v-else class="well flex h-36 w-56 items-center justify-center rounded-lg text-muted-foreground" :class="loading && 'animate-pulse'">

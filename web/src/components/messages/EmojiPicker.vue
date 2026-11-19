@@ -3,6 +3,7 @@ import { ref, watch } from 'vue'
 import { Plus } from 'lucide-vue-next'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import EmojiGrid from './EmojiGrid.vue'
+import { addRecent } from '@/lib/emoji'
 import { QUICK_EMOJI } from './emoji'
 
 /** `quick`: shows a row of common emoji with a "+" for the full grid; otherwise the grid directly. */
@@ -16,6 +17,7 @@ watch(open, (o) => {
 })
 
 function pick(e: string) {
+  addRecent(e)
   open.value = false
   emit('pick', e)
 }

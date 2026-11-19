@@ -8,7 +8,11 @@ export function docToPlainText(doc: JSONContent | undefined): string {
   let nodes = 0
   const walk = (n: JSONContent, depth: number): string => {
     if (!n || typeof n !== 'object' || nodes++ > MAX_DOC_NODES || depth > 50) return ''
-    if (n.type === 'text') return typeof n.text === 'string' ? n.text : ''
+    if (n.type === 'text') {
+      if (typeof n.text !== 'string') return ''
+      // Spoilers keep their ||markers|| so pasting the text back keeps them hidden.
+      return n.marks?.some((m) => m.type === 'spoiler') ? `||${n.text}||` : n.text
+    }
     if (n.type === 'hardBreak') return '\n'
     const kids = Array.isArray(n.content) ? n.content : []
     const inner = (sep: string) => kids.map((k) => walk(k, depth + 1)).join(sep)

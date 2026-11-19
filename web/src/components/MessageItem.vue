@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { Clock, CornerUpLeft, Copy, Forward, Pencil, RotateCw, SmilePlus, Star, Trash2, TriangleAlert } from 'lucide-vue-next'
+import { Clock, CornerUpLeft, Copy, Download, Forward, ImageDown, Link2, Pencil, Quote, RotateCw, SmilePlus, Star, Trash2, TriangleAlert } from 'lucide-vue-next'
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub,
   ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger,
@@ -10,11 +10,13 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import EmojiPicker from '@/components/messages/EmojiPicker.vue'
 import MessageEditor from '@/components/messages/MessageEditor.vue'
 import ReactionBar from '@/components/messages/ReactionBar.vue'
-import { QUICK_EMOJI } from '@/components/messages/emoji'
+import { QUICK_EMOJI, isEmojiOnly } from '@/components/messages/emoji'
+import { copyImage, saveImage } from '@/components/messages/imageActions'
 import { useLongPress } from '@/components/messages/longpress'
-import { canDeleteMsg, canEditMsg, canForward, deleteMsg, deleteTarget, editingId, flashId, forwardMsg, myId, reactTo, replyTo, retry, toggleStar } from '@/components/messages/state'
+import { canDeleteMsg, canEditMsg, composerApi, canForward, deleteMsg, deleteTarget, editingId, flashId, forwardMsg, myId, reactTo, replyTo, retry, toggleStar } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
 import { ago, formatClock, formatFull, hueOf } from '@/lib/format'
+import { messageLink, openMessageLink, parseMessageLink } from '@/lib/links'
 import { renderMessageHtml } from '@/lib/render'
 import type { ChatMessage } from '@/lib/types'
 import { copyText, openUser } from '@/lib/ui'
@@ -54,6 +56,12 @@ const canEdit = computed(() => canEditMsg(props.msg))
 const canDelete = computed(() => canDeleteMsg(props.msg))
 const canCopy = computed(() => props.msg.kind === 'text')
 const copyMsg = () => copyText(chat.copyText(props.msg), 'Copied')
+const isImage = computed(() => props.msg.kind === 'file' && chat.isImage(props.msg))
+const copyLink = () => copyText(messageLink(props.msg.conv, props.msg.id), 'Link copied')
+const quote = () => composerApi.quote?.(chat.copyText(props.msg))
+
+/** 1 to 6 emoji and nothing else: shown large. */
+const bigEmoji = computed(() => props.msg.kind === 'text' && !html.value.includes('class="spoiler"') && isEmojiOnly(chat.copyText(props.msg)))
 
 const html = computed(() => {
   if (props.msg.kind !== 'text') return ''
@@ -94,7 +102,36 @@ watch(html, async () => {
   addCopyButtons()
 })
 
+/** Spoilers start hidden; this shows one (it stays shown until the message re-renders). */
+function revealSpoiler(el: HTMLElement) {
+  el.classList.add('revealed')
+  el.removeAttribute('role')
+  el.removeAttribute('tabindex')
+  el.removeAttribute('aria-label')
+}
+
+function onBodyKey(e: KeyboardEvent) {
+  const sp = (e.target as HTMLElement).closest<HTMLElement>('.spoiler:not(.revealed)')
+  if (!sp || (e.key !== 'Enter' && e.key !== ' ')) return
+  e.preventDefault()
+  revealSpoiler(sp)
+}
+
 function onBodyClick(e: MouseEvent) {
+  const spoiler = (e.target as HTMLElement).closest<HTMLElement>('.spoiler:not(.revealed)')
+  if (spoiler) {
+    e.preventDefault() // a link inside a spoiler shouldn't open until it is revealed
+    revealSpoiler(spoiler)
+    return
+  }
+  // Links to messages open inside the app.
+  const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('a[href]')
+  const target = a && parseMessageLink(a.getAttribute('href') ?? '')
+  if (target) {
+    e.preventDefault()
+    void openMessageLink(target)
+    return
+  }
   const mention = (e.target as HTMLElement).closest<HTMLElement>('.mention')
   if (mention?.dataset.uid) {
     openUser(mention.dataset.uid)
@@ -111,12 +148,25 @@ function onBodyClick(e: MouseEvent) {
 const press = useLongPress(() => props.msg, () => !editing.value)
 
 // WebKit clears a text selection on right-click; keep it and let the native Copy menu appear instead.
+// WebKit on a Mac also selects the word under the pointer just before the contextmenu event: that
+// isn't the user's selection, so remember whether there was one when the button went down.
+let selectedBeforeMenu = false
+function onMousedownCapture(e: MouseEvent) {
+  if (e.button !== 2 && !(e.button === 0 && e.ctrlKey)) return
+  const sel = window.getSelection()
+  const row = e.currentTarget as HTMLElement | null
+  selectedBeforeMenu = !!row && !!sel && !sel.isCollapsed && sel.rangeCount > 0 && sel.containsNode(row, true)
+}
 function onContextmenuCapture(e: MouseEvent) {
   press.bind.onContextmenuCapture(e)
   if (e.cancelBubble) return
   const sel = window.getSelection()
   const row = e.currentTarget as HTMLElement | null
-  if (row && sel && !sel.isCollapsed && sel.rangeCount && sel.containsNode(row, true)) e.stopPropagation()
+  const userSelection = selectedBeforeMenu
+  selectedBeforeMenu = false
+  if (!row || !sel || sel.isCollapsed || !sel.rangeCount || !sel.containsNode(row, true)) return
+  if (userSelection) e.stopPropagation()
+  else sel.removeAllRanges() // the word WebKit picked: drop it, the app's menu acts on the whole message
 }
 
 function reactFromToolbar(emoji: string) {
@@ -144,7 +194,7 @@ function askDelete(e?: MouseEvent) {
         :data-mid="msg.id"
         class="msg-row group relative px-4 py-0.5 pr-6 transition-colors duration-500 [-webkit-touch-callout:none]"
         v-bind="press.bind"
-        @contextmenu.capture="onContextmenuCapture"
+        @mousedown.capture="onMousedownCapture" @contextmenu.capture="onContextmenuCapture"
         :class="[
           press.pressing.value && 'select-none',
           head ? 'mt-4' : '',
@@ -182,8 +232,8 @@ function askDelete(e?: MouseEvent) {
             <div v-if="msg.forwarded" class="flex items-center gap-1 text-xs text-muted-foreground"><Forward class="size-3" />Forwarded</div>
             <MessageEditor v-if="editing" :msg="msg" />
             <div
-              v-else-if="msg.kind === 'text'" ref="body" class="prose-like text-[15px] text-foreground/90 [&_pre]:relative [&_pre]:rounded-md [&_pre]:border [&_pre]:border-line [&_pre]:bg-inset [&_pre]:px-3 [&_pre]:py-2 [&_pre]:font-mono [&_pre]:text-[13px] [&_pre]:leading-[1.45] [&_pre_code]:leading-[1.45] [&_pre[data-lang]]:before:mb-1 [&_pre[data-lang]]:before:block [&_pre[data-lang]]:before:text-[10px] [&_pre[data-lang]]:before:font-semibold [&_pre[data-lang]]:before:tracking-wide [&_pre[data-lang]]:before:text-muted-foreground [&_pre[data-lang]]:before:uppercase [&_pre[data-lang]]:before:content-[attr(data-lang)] [&_pre_code]:bg-transparent"
-              @click="onBodyClick" v-html="html"
+              v-else-if="msg.kind === 'text'" ref="body" class="prose-like text-foreground/90 [&_pre]:relative [&_pre]:rounded-md [&_pre]:border [&_pre]:border-line [&_pre]:bg-inset [&_pre]:px-3 [&_pre]:py-2 [&_pre]:font-mono [&_pre]:text-[13px] [&_pre]:leading-[1.45] [&_pre_code]:leading-[1.45] [&_pre[data-lang]]:before:mb-1 [&_pre[data-lang]]:before:block [&_pre[data-lang]]:before:text-[10px] [&_pre[data-lang]]:before:font-semibold [&_pre[data-lang]]:before:tracking-wide [&_pre[data-lang]]:before:text-muted-foreground [&_pre[data-lang]]:before:uppercase [&_pre[data-lang]]:before:content-[attr(data-lang)] [&_pre_code]:bg-transparent"
+              :class="bigEmoji ? 'text-4xl leading-tight' : 'text-[15px]'" @click="onBodyClick" @keydown="onBodyKey" v-html="html"
             />
             <FileMessage v-else-if="msg.kind === 'file' && msg.file" :msg="msg" />
             <div v-if="failed" class="mt-0.5 flex items-center gap-2 text-xs font-medium text-destructive opacity-100">
@@ -193,7 +243,7 @@ function askDelete(e?: MouseEvent) {
             <Clock v-if="msg.status === 'sending' && !head" class="mt-0.5 size-3 text-muted-foreground" aria-label="Sending" />
             <Star v-if="starred && !head" class="mt-0.5 size-3 fill-current text-amber-500" aria-label="Starred" title="Starred" />
             <ReactionBar :msg="msg" />
-            <div v-if="receipt && !failed" class="mt-0.5 text-right text-xs text-muted-foreground" :title="receipt.title">{{ receipt.text }}</div>
+            <div v-if="receipt && !failed" class="mt-0.5 text-xs text-muted-foreground" :title="receipt.title">{{ receipt.text }}</div>
           </div>
         </div>
 
@@ -204,14 +254,14 @@ function askDelete(e?: MouseEvent) {
           :class="pickerOpen && '!opacity-100'"
         >
           <EmojiPicker v-model:open="pickerOpen" quick @pick="reactFromToolbar">
-            <button type="button" class="btn btn-ghost btn-icon btn-sm" title="Add reaction" aria-label="Add reaction"><SmilePlus /></button>
+            <button type="button" tabindex="-1" class="btn btn-ghost btn-icon btn-sm" title="Add reaction" aria-label="Add reaction"><SmilePlus /></button>
           </EmojiPicker>
-          <button type="button" class="btn btn-ghost btn-icon btn-sm" title="Reply" aria-label="Reply" @click="replyTo = msg"><CornerUpLeft /></button>
-          <button type="button" class="btn btn-ghost btn-icon btn-sm" :title="starred ? 'Unstar' : 'Star'" :aria-label="starred ? 'Unstar' : 'Star'" @click="toggleStar(msg)"><Star :class="starred && 'fill-current text-amber-500'" /></button>
-          <button v-if="canForward(msg)" type="button" class="btn btn-ghost btn-icon btn-sm" title="Forward" aria-label="Forward" @click="forwardMsg = msg"><Forward /></button>
-          <button v-if="canEdit" type="button" class="btn btn-ghost btn-icon btn-sm" title="Edit" aria-label="Edit" @click="editingId = msg.id"><Pencil /></button>
+          <button type="button" tabindex="-1" class="btn btn-ghost btn-icon btn-sm" title="Reply" aria-label="Reply" @click="replyTo = msg"><CornerUpLeft /></button>
+          <button type="button" tabindex="-1" class="btn btn-ghost btn-icon btn-sm" :title="starred ? 'Unstar' : 'Star'" :aria-label="starred ? 'Unstar' : 'Star'" @click="toggleStar(msg)"><Star :class="starred && 'fill-current text-amber-500'" /></button>
+          <button v-if="canForward(msg)" type="button" tabindex="-1" class="btn btn-ghost btn-icon btn-sm" title="Forward" aria-label="Forward" @click="forwardMsg = msg"><Forward /></button>
+          <button v-if="canEdit" type="button" tabindex="-1" class="btn btn-ghost btn-icon btn-sm" title="Edit" aria-label="Edit" @click="editingId = msg.id"><Pencil /></button>
           <button
-            v-if="canDelete" type="button" class="btn btn-ghost btn-icon btn-sm hover:!text-destructive"
+            v-if="canDelete" type="button" tabindex="-1" class="btn btn-ghost btn-icon btn-sm hover:!text-destructive"
             title="Delete (shift-click to skip confirmation)" aria-label="Delete" @click="askDelete"
           >
             <Trash2 />
@@ -237,12 +287,17 @@ function askDelete(e?: MouseEvent) {
           <div class="grid grid-cols-4 gap-0.5 p-0.5">
             <ContextMenuItem v-for="e in QUICK_EMOJI" :key="e" class="size-9 justify-center !p-0 text-xl" @select="reactTo(msg, e)">{{ e }}</ContextMenuItem>
           </div>
+          <ContextMenuItem @select="pickerOpen = true"><SmilePlus />More emoji…</ContextMenuItem>
         </ContextMenuSubContent>
       </ContextMenuSub>
       <ContextMenuItem @select="replyTo = msg"><CornerUpLeft />Reply</ContextMenuItem>
       <ContextMenuItem v-if="canForward(msg)" @select="forwardMsg = msg"><Forward />Forward</ContextMenuItem>
       <ContextMenuItem @select="toggleStar(msg)"><Star :class="starred && 'fill-current'" />{{ starred ? 'Unstar' : 'Star' }}</ContextMenuItem>
       <ContextMenuItem v-if="canCopy" @select="copyMsg"><Copy />Copy text</ContextMenuItem>
+      <ContextMenuItem v-if="canCopy" @select="quote"><Quote />Quote</ContextMenuItem>
+      <ContextMenuItem v-if="isImage" @select="copyImage(msg)"><ImageDown />Copy image</ContextMenuItem>
+      <ContextMenuItem v-if="isImage" @select="saveImage(msg)"><Download />Save image</ContextMenuItem>
+      <ContextMenuItem @select="copyLink"><Link2 />Copy message link</ContextMenuItem>
       <template v-if="canEdit || canDelete">
         <ContextMenuSeparator />
         <ContextMenuItem v-if="canEdit" @select="editingId = msg.id"><Pencil />Edit message</ContextMenuItem>

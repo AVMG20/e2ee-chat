@@ -62,6 +62,8 @@ type PayloadBody =
   | { t: 'read'; ts: number; with?: string }
   /** My profile picture (the attachment; empty to remove it). Sent to all my contacts. */
   | { t: 'profile'; mime: string; name?: string }
+  /** My status text ('' to clear it). Sent to all my contacts, like my profile. */
+  | { t: 'note'; text: string }
   /** Only the author's own messages can be edited or deleted (checked on receipt). */
   | { t: 'edit'; target: string; doc: JSONContent }
   | { t: 'delete'; target: string }
@@ -155,6 +157,8 @@ function validHeader(h: PayloadHeader): boolean {
       return typeof b.ts === 'number' && Number.isFinite(b.ts) && (b.with === undefined || validId(b.with))
     case 'profile':
       return isStr(b.mime) && (b.name === undefined || (isStr(b.name) && b.name.length <= 64))
+    case 'note':
+      return isStr(b.text) && b.text.length <= 256
     default:
       return false
   }
@@ -198,6 +202,8 @@ interface Pin {
 }
 interface ConvMeta {
   unread: number
+  /** How many of the unread messages mention or reply to me. */
+  mentions?: number
   lastTs: number
   preview: string
   /** Newest message from someone else that I've told my devices (and maybe them) I read. */
@@ -229,6 +235,8 @@ interface Outgoing {
 }
 interface Settings {
   readReceipts: boolean
+  /** New groups start as "mentions only" (notifications). */
+  groupMentions?: boolean
   at: number
 }
 interface Profile {
@@ -245,6 +253,10 @@ interface Profile {
   at: number
   /** When it was last sent to all contacts (it's re-sent before old copies expire on the server). */
   sentAt: number
+  /** Status text ("in a meeting until 3"), sent separately from the picture. */
+  note?: string
+  /** When the status text was last changed (0/missing: never). */
+  noteAt?: number
 }
 interface StoredAvatar {
   at: number
@@ -289,6 +301,12 @@ const K = {
   file: (mid: string) => `file:${mid}`,
   seen: (mid: string) => `seen:${mid}`,
   avatar: (id: string) => `avatar:${id}`,
+  /** A contact's status text: { at, text }. */
+  note: (id: string) => `note:${id}`,
+  /** The conversation that was open last (reopened after a restart). */
+  last: 'last',
+  /** Unsent drafts: conversation → editor document. */
+  drafts: 'drafts',
 }
 const LS_USER = 'e2ee-chat.lastUsername'
 const LS_SERVER = 'e2ee-chat.lastServer'
@@ -336,7 +354,7 @@ export interface ChatState {
   reads: Dict<number>
   /** Users I blocked. */
   blocked: FriendRequest[]
-  settings: { readReceipts: boolean }
+  settings: { readReceipts: boolean; groupMentions: boolean }
   /** Starred messages: "<conv> <message id>" → true. Use chat.isStarred(msg). */
   starred: Dict<true>
 }
@@ -358,7 +376,7 @@ export const state = reactive<ChatState>({
   highlight: null,
   reads: dict(),
   blocked: [],
-  settings: { readReceipts: true },
+  settings: { readReceipts: true, groupMentions: false },
   starred: dict(),
 })
 
@@ -560,6 +578,8 @@ class Session {
   groupPicUrls = new Map<string, string>()
   /** Version (time) of each contact's profile I have, and when I last asked someone / was asked for one. */
   profileAt = new Map<string, number>()
+  /** Contacts' status texts. */
+  notes = new Map<string, string>()
   profileAsking = new Map<string, number>()
   profileAsked = new Map<string, number>()
   /** Display names contacts chose (user ID → name). */
@@ -807,7 +827,10 @@ function parseVault(raw: unknown): VaultData {
     if (validStarKey(k) && st && typeof st.on === 'boolean' && typeof st.at === 'number') out.stars[k] = { on: st.on, at: st.at }
   }
   const st = v.settings as Settings | undefined
-  if (st && typeof st.readReceipts === 'boolean' && typeof st.at === 'number') out.settings = { readReceipts: st.readReceipts, at: st.at }
+  if (st && typeof st.readReceipts === 'boolean' && typeof st.at === 'number') {
+    out.settings = { readReceipts: st.readReceipts, at: st.at }
+    if (st.groupMentions === true) out.settings.groupMentions = true
+  }
   const pr = v.profile as Profile | undefined
   if (
     pr && typeof pr.at === 'number' && typeof pr.sentAt === 'number' && isStr(pr.mime) &&
@@ -817,6 +840,11 @@ function parseVault(raw: unknown): VaultData {
     const name = isStr(pr.name) ? cleanLabel(pr.name, MAX_DISPLAY_NAME) : ''
     if (name) out.profile.name = name
     if (pr.pic === true) out.profile.pic = true
+    if (typeof pr.noteAt === 'number' && Number.isFinite(pr.noteAt)) {
+      out.profile.noteAt = pr.noteAt
+      const note = isStr(pr.note) ? cleanLabel(pr.note, MAX_NOTE) : ''
+      if (note) out.profile.note = note
+    }
   }
   for (const [id, t] of Object.entries(dict(v.left))) if (validGroupId(id) && typeof t === 'number') out.left[id] = t
   return out
@@ -839,6 +867,7 @@ function vaultBehind(s: Session): boolean {
   for (const [c, p] of Object.entries(s.prefs)) if (!r.prefs[c] || p.at > r.prefs[c]!.at) return true
   for (const [k, st] of Object.entries(s.stars)) if (!r.stars[k] || st.at > r.stars[k]!.at) return true
   if (s.settings.at > r.settings.at || s.profile.at > r.profile.at || s.profile.sentAt > r.profile.sentAt) return true
+  if ((s.profile.noteAt ?? 0) > (r.profile.noteAt ?? 0)) return true
   return false
 }
 
@@ -899,7 +928,12 @@ async function applyVault(s: Session, sealed: string | null | undefined) {
     if (starsChanged) showStars(s)
     if (remote.settings.at > s.settings.at) {
       s.settings = remote.settings
-      state.settings = { readReceipts: s.settings.readReceipts }
+      showSettings(s)
+    }
+    const note = { note: s.profile.note, noteAt: s.profile.noteAt }
+    if ((remote.profile.noteAt ?? 0) > (note.noteAt ?? 0)) {
+      note.note = remote.profile.note
+      note.noteAt = remote.profile.noteAt
     }
     if (remote.profile.at > s.profile.at) {
       // The picture's bytes come separately (own profile message), unless an older app put them in.
@@ -909,6 +943,13 @@ async function applyVault(s: Session, sealed: string | null | undefined) {
     } else if (remote.profile.at === s.profile.at && remote.profile.sentAt > s.profile.sentAt) {
       s.profile.sentAt = remote.profile.sentAt
       s.profileDirty = true
+    }
+    if (note.noteAt !== s.profile.noteAt) {
+      s.profile.noteAt = note.noteAt
+      s.profile.note = note.note
+      if (!s.profile.note) delete s.profile.note
+      s.profileDirty = true
+      showMyAvatar(s)
     }
     scheduleFlush(s)
     refreshConversations()
@@ -956,6 +997,7 @@ function updateContactFromPin(s: Session, id: string, patch: Partial<Contact> = 
     keyChanged: changed,
     pendingFingerprint: changed ? fingerprint(serverKeys!) : null,
     avatar: s.avatarUrls.get(id) ?? null,
+    note: s.notes.get(id) ?? '',
     ...patch,
   }
 }
@@ -984,10 +1026,61 @@ function showMyAvatar(s: Session) {
   if (state.account) {
     state.account.avatar = s.avatarUrls.get(s.me) ?? null
     state.account.displayName = s.profile.name || s.saved.username
+    state.account.note = s.profile.note ?? ''
   }
 }
 
 const MAX_DISPLAY_NAME = 32
+const MAX_NOTE = 128
+
+/** Is there anything of my profile (picture, name, status text) to send to new contacts? */
+const hasProfile = (s: Session) => !!(s.profile.avatar || s.profile.name || s.profile.noteAt)
+
+/** Sends my profile (if I set a picture or name) and my status text (if I ever set one) to these contacts. */
+function shareProfile(s: Session, ids: string[]) {
+  if (s.profile.avatar || s.profile.name) sendProfile(s, ids)
+  if (s.profile.noteAt) sendNote(s, ids)
+}
+
+/** Sends my status text to these contacts (and my other devices), in batches. */
+function sendNote(s: Session, ids: string[]) {
+  const body: PayloadBody = { t: 'note', text: s.profile.note ?? '' }
+  const at = s.profile.noteAt || Date.now()
+  for (let i = 0; i === 0 || i < ids.length; i += 200) {
+    sendEnvelope(s, ids.slice(i, i + 200), { conv: { t: 'dm' }, body }, undefined, randomId(), at)
+  }
+}
+
+/** A contact's status text, if newer than what I have. Only call from inside serial(). */
+async function receiveNote(s: Session, sender: string, ts: number, raw: string) {
+  const prev = await get<{ at: number; text: string }>(K.note(sender), db)
+  if (prev && prev.at >= ts) return
+  const text = cleanLabel(raw, MAX_NOTE)
+  await set(K.note(sender), { at: ts, text }, db)
+  if (!live(s)) return
+  if (text) s.notes.set(sender, text)
+  else s.notes.delete(sender)
+  if (state.contacts[sender]) updateContactFromPin(s, sender)
+}
+
+/** Sets (or with '' clears) my status text. Sent encrypted to my contacts and my other devices. */
+export function setStatusText(input: string) {
+  const s = requireSession()
+  const text = cleanLabel(input, MAX_NOTE)
+  if ((s.profile.note ?? '') === text) return
+  s.profile = { ...s.profile, noteAt: Math.max(Date.now(), (s.profile.noteAt ?? 0) + 1) }
+  if (text) s.profile.note = text
+  else delete s.profile.note
+  s.profileDirty = true
+  showMyAvatar(s)
+  scheduleFlush(s)
+  scheduleVaultPush(s)
+  try {
+    sendNote(s, profileAudience(s))
+  } catch {
+    /* my other devices get it through the vault; contacts with the next profile refresh */
+  }
+}
 
 /** Stores a contact's profile picture and display name if newer than what I have. Only call from inside serial(). */
 async function receiveProfile(s: Session, sender: string, ts: number, mime: string, bytes: Uint8Array, rawName?: string) {
@@ -1064,7 +1157,7 @@ function receiveOwnProfile(s: Session, ts: number, mime: string, bytes: Uint8Arr
 
 /** New contacts get my picture shortly after I first see them. */
 function queueProfile(s: Session, id: string) {
-  if ((!s.profile.avatar && !s.profile.name) || s.fresh) return
+  if (!hasProfile(s) || s.fresh) return
   s.profileQueue.add(id)
   if (s.profileTimer) return
   s.profileTimer = setTimeout(() => {
@@ -1074,7 +1167,7 @@ function queueProfile(s: Session, id: string) {
     s.profileQueue.clear()
     if (!live(s) || !ids.length) return
     try {
-      sendProfile(s, ids)
+      shareProfile(s, ids)
     } catch (e) {
       console.warn('could not send profile picture', e)
     }
@@ -1083,9 +1176,9 @@ function queueProfile(s: Session, id: string) {
 
 /** Messages on the server expire, so my picture is re-sent to everyone every 60 days. */
 function refreshProfile(s: Session) {
-  if ((!s.profile.avatar && !s.profile.name) || Date.now() - s.profile.sentAt < 60 * 86_400_000) return
+  if (!hasProfile(s) || Date.now() - s.profile.sentAt < 60 * 86_400_000) return
   try {
-    sendProfile(s, profileAudience(s))
+    shareProfile(s, profileAudience(s))
     s.profile.sentAt = Date.now()
     s.profileDirty = true
     scheduleFlush(s)
@@ -1205,7 +1298,7 @@ function refreshConversations() {
     const muted = isMuted(p, now)
     if (muted && p!.until) nextEnd = Math.min(nextEnd, p!.until)
     list.push({
-      id, kind, title, unread: m.unread, lastTs: m.lastTs, preview: m.preview,
+      id, kind, title, unread: m.unread, mentions: Math.min(m.mentions ?? 0, m.unread), lastTs: m.lastTs, preview: m.preview,
       muted, mutedUntil: muted && p!.until ? p!.until : null, mentionsOnly: !!p?.mentions,
       pinned: !!p?.pinned, archived: !!p?.archived,
       avatar: kind === 'group' ? (s.groupPicUrls.get(id.slice(2)) ?? null) : (s.avatarUrls.get(id.slice(3)) ?? null),
@@ -1216,7 +1309,7 @@ function refreshConversations() {
   if (nextEnd < Infinity) {
     s.muteTimer = setTimeout(() => live(s) && refreshConversations(), Math.min(Math.max(nextEnd - now + 50, 1000), 2 ** 31 - 1))
   }
-  for (const g of Object.values(state.groups)) add(`g:${g.id}`, 'group', g.name)
+  for (const g of Object.values(state.groups)) add(`g:${g.id}`, 'group', groupTitleOf(s, g))
   for (const c of Object.values(state.contacts)) {
     if (c.friend || s.meta[`dm:${c.id}`]) add(`dm:${c.id}`, 'dm', c.name)
   }
@@ -1266,7 +1359,10 @@ async function appendMessage(s: Session, m: ChatMessage, countUnread: boolean) {
     meta.preview = previewLine(s, m)
   }
   // Also counted in the open chat while the app isn't being looked at (cleared on return).
-  if (countUnread && !s.fresh && (state.active !== m.conv || !watching())) meta.unread++
+  if (countUnread && !s.fresh && (state.active !== m.conv || !reading())) {
+    meta.unread++
+    if (mentionsMe(s, m)) meta.mentions = (meta.mentions ?? 0) + 1
+  }
   s.meta[m.conv] = meta
   if (countUnread && !s.fresh) {
     const p = s.prefs[m.conv]
@@ -1337,6 +1433,7 @@ async function applyChange(s: Session, conv: ConvId, sender: string, body: Paylo
     const meta = s.meta[conv]
     if (meta?.unread && m.from !== s.me && m.ts > (meta.readTs ?? 0)) {
       meta.unread = Math.max(0, meta.unread - 1)
+      if (meta.mentions && mentionsMe(s, m)) meta.mentions--
       refreshConversations()
     }
     const key = starKey(conv, m.id)
@@ -1456,14 +1553,28 @@ function mentionsMe(s: Session, m: ChatMessage): boolean {
 let windowActive: boolean | null = null
 /** Is the open chat actually on screen (not the friends view, not the chat list on a phone)? */
 let convVisible = true
+/** Is the open chat scrolled to its newest message? Scrolled up, new messages stay unread. */
+let atBottom = true
 const watching = () =>
   convVisible && typeof document !== 'undefined' && document.visibilityState === 'visible' && (windowActive ?? document.hasFocus())
+/** Watching, and at the newest message: what arrives now counts as read. */
+const reading = () => watching() && atBottom
 
 /** The UI says whether the open chat is on screen; messages in it only count as read while it is. */
 export function setConvVisible(visible: boolean) {
   if (convVisible === visible) return
   convVisible = visible
   if (visible) poke()
+}
+
+/**
+ * The UI says whether the open chat is scrolled to the bottom. While it isn't, new messages
+ * count as unread (state.conversations) and no read receipt goes out; back at the bottom they're read.
+ */
+export function setAtBottom(bottom: boolean) {
+  if (atBottom === bottom) return
+  atBottom = bottom
+  if (bottom) poke()
 }
 
 /** Desktop app: the window gained or lost focus (or was hidden). */
@@ -1483,6 +1594,7 @@ function catchUpActive(s: Session) {
   if (!conv || !meta?.unread) return
   const n = meta.unread
   meta.unread = 0
+  meta.mentions = 0
   scheduleFlush(s)
   refreshConversations()
   {
@@ -1499,7 +1611,7 @@ function catchUpActive(s: Session) {
 }
 
 function poke() {
-  if (!session || !state.active || !watching()) return
+  if (!session || !state.active || !reading()) return
   catchUpActive(session)
   scheduleRead(session)
 }
@@ -1515,7 +1627,7 @@ function scheduleRead(s: Session) {
  */
 async function sendRead(s: Session) {
   const conv = state.active
-  if (!live(s) || !conv || !watching() || !s.conn) return
+  if (!live(s) || !conv || !reading() || !s.conn) return
   const list = await loadConv(s, conv)
   let ts = 0
   for (let i = list.length - 1; i >= 0; i--) {
@@ -1562,7 +1674,9 @@ async function applyRead(s: Session, conv: ConvId, sender: string, ts: number) {
     meta.readTs = ts
     if (meta.unread) {
       const list = await loadConv(s, conv)
-      meta.unread = list.filter((m) => m.from && m.from !== s.me && m.ts > ts).length
+      const left = list.filter((m) => m.from && m.from !== s.me && m.ts > ts)
+      meta.unread = left.length
+      meta.mentions = left.filter((m) => mentionsMe(s, m)).length
     }
   } else {
     const reads = dict<number>(meta.reads)
@@ -1654,6 +1768,21 @@ function groupsChanged(s: Session) {
 }
 
 const names = (ids: string[]) => ids.map(displayName).join(', ')
+
+/** A group's name, or for a group without one, the other members' names ("bob, carol"). */
+function groupTitleOf(s: Session, g: Group): string {
+  if (g.name) return g.name
+  const others = g.members.filter((id) => id !== s.me)
+  if (!others.length) return 'Just you'
+  const shown = others.slice(0, 4).map(displayName).join(', ')
+  return others.length > 4 ? `${shown} +${others.length - 4}` : shown
+}
+
+/** Title of a group (its name, or its members' names when it has none). */
+export function groupTitle(groupId: string): string {
+  const g = state.groups[groupId]
+  return g && session ? groupTitleOf(session, g) : 'Group'
+}
 
 // ---------------------------------------------------------------------------
 // Receiving
@@ -1797,7 +1926,7 @@ async function handlePayload(
     const existing = state.groups[body.id]
     if (!existing) {
       if (!proposed.includes(me) || !trusted || s.left[body.id]) return
-      const name = cleanLabel(body.name, 64) || 'Group'
+      const name = cleanLabel(body.name, 64)
       await ensurePinned(s, proposed).catch(noop)
       const group: Group = { id: body.id, name, members: proposed }
       if (body.admins) {
@@ -1805,14 +1934,15 @@ async function handlePayload(
         group.admins = admins.length ? admins : [sender]
       }
       state.groups[body.id] = group
+      if (!mine) applyGroupDefault(s, conv)
       groupsChanged(s)
       const others = proposed.filter((id) => id !== me && id !== sender)
       await systemMessage(
         s,
         conv,
         mine
-          ? `You created “${name}”${others.length ? ` with ${names(others)}` : ''}`
-          : `${displayName(sender)} added you to “${name}”`,
+          ? `You created ${name ? `“${name}”` : 'a group'}${others.length ? ` with ${names(others)}` : ''}`
+          : name ? `${displayName(sender)} added you to “${name}”` : `${displayName(sender)} added you to a group${others.length ? ` with ${names(others)}` : ''}`,
         ts,
       )
       return
@@ -1867,13 +1997,32 @@ async function handlePayload(
     // Someone I share a chat with has an older copy of my profile: send it to them (at most hourly).
     if (mine || !s.pins[sender] || state.blocked.some((b) => b.id === sender)) return
     const last = s.profileAsked.get(sender) ?? 0
-    if (Date.now() - last < 3600_000 || (!s.profile.avatar && !s.profile.name)) return
+    if (Date.now() - last < 3600_000 || !hasProfile(s)) return
     s.profileAsked.set(sender, Date.now())
     try {
-      sendProfile(s, [sender])
+      shareProfile(s, [sender])
     } catch {
       /* they ask again with a later message */
     }
+    return
+  }
+
+  if (body.t === 'note') {
+    if (pc.t !== 'dm') return
+    if (mine) {
+      if (ts > (s.profile.noteAt ?? 0)) {
+        const text = cleanLabel(body.text, MAX_NOTE)
+        s.profile = { ...s.profile, noteAt: ts }
+        if (text) s.profile.note = text
+        else delete s.profile.note
+        s.profileDirty = true
+        showMyAvatar(s)
+        scheduleFlush(s)
+      }
+      return
+    }
+    if (!s.pins[sender] || state.blocked.some((b) => b.id === sender)) return
+    await receiveNote(s, sender, ts, body.text)
     return
   }
 
@@ -2228,7 +2377,7 @@ function resetState() {
     highlight: null,
     reads: dict(),
     blocked: [],
-    settings: { readReceipts: true },
+    settings: { readReceipts: true, groupMentions: false },
     starred: dict(),
   } satisfies Partial<ChatState>)
 }
@@ -2253,13 +2402,20 @@ async function loadSession(saved: Saved): Promise<Session> {
   const avatarKeys: string[] = []
   const outKeys: string[] = []
   const picKeys: string[] = []
+  const noteKeys: string[] = []
   for (const key of await idbKeys(db)) {
     if (!isStr(key)) continue
     if (key.startsWith('seen:')) s.seen.add(key.slice(5))
     else if (key.startsWith('avatar:')) avatarKeys.push(key)
     else if (key.startsWith('out:')) outKeys.push(key)
     else if (key.startsWith('gpic:')) picKeys.push(key)
+    else if (key.startsWith('note:')) noteKeys.push(key)
   }
+  const notes = await getMany<{ at: number; text: string } | undefined>(noteKeys, db)
+  noteKeys.forEach((key, i) => {
+    const n = notes[i]
+    if (n && isStr(n.text) && n.text) s.notes.set(key.slice(5), n.text)
+  })
   const pics = await getMany<StoredAvatar | undefined>(picKeys, db)
   picKeys.forEach((key, i) => {
     const p = pics[i]
@@ -2285,10 +2441,10 @@ async function loadSession(saved: Saved): Promise<Session> {
   session = s
   resetState()
   state.account = {
-    server: saved.server, id: saved.id, username: saved.username, avatar: null, displayName: saved.username, status: 'online',
+    server: saved.server, id: saved.id, username: saved.username, avatar: null, displayName: saved.username, status: 'online', note: '',
     fingerprint: fingerprint({ signPk: saved.identity.signPk, encPk: saved.identity.encPk }),
   }
-  state.settings = { readReceipts: s.settings.readReceipts }
+  showSettings(s)
   showMyAvatar(s)
   state.groups = vault.groups
   for (const id of Object.keys(s.pins)) updateContactFromPin(s, id)
@@ -2574,10 +2730,13 @@ function releaseFiles(s: Session, keep: ConvId) {
 export async function openConv(conv: ConvId, focus?: string): Promise<boolean> {
   const s = requireSession()
   state.active = conv
+  atBottom = true // chats open at the newest message
+  void set(K.last, conv, db).catch(noop)
   const meta = s.meta[conv]
   const unread = meta?.unread ?? 0
   if (meta?.unread) {
     meta.unread = 0
+    meta.mentions = 0
     scheduleFlush(s)
     refreshConversations()
   }
@@ -2606,6 +2765,38 @@ export async function openConv(conv: ConvId, focus?: string): Promise<boolean> {
   return !focus || focusAt >= 0
 }
 
+/** The conversation that was open last on this device (to reopen after a restart), if it still exists. */
+export async function lastConversation(): Promise<ConvId | null> {
+  const s = requireSession()
+  const conv = await get<unknown>(K.last, db).catch(() => null)
+  if (!live(s) || !isStr(conv) || !validConvId(conv)) return null
+  return state.conversations.some((c) => c.id === conv) ? conv : null
+}
+
+/** Unsent drafts saved on this device (conversation → editor document). */
+export async function loadDrafts(): Promise<Partial<Record<ConvId, JSONContent>>> {
+  const s = requireSession()
+  const raw = await get<unknown>(K.drafts, db).catch(() => null)
+  if (!live(s) || !raw || typeof raw !== 'object') return {}
+  const out: Partial<Record<ConvId, JSONContent>> = {}
+  for (const [c, d] of Object.entries(raw as Record<string, unknown>)) {
+    if (validConvId(c) && d && typeof d === 'object' && (d as JSONContent).type === 'doc') out[c] = d as JSONContent
+  }
+  return out
+}
+
+let draftTimer: ReturnType<typeof setTimeout> | undefined
+/** Saves the drafts on this device (debounced; pass all of them). Deleted on sign-out. */
+export function saveDrafts(drafts: Partial<Record<ConvId, JSONContent>>) {
+  const s = session
+  if (!s) return
+  clearTimeout(draftTimer)
+  const copy = JSON.parse(JSON.stringify(drafts)) as Record<string, JSONContent>
+  draftTimer = setTimeout(() => {
+    if (live(s)) void set(K.drafts, copy, db).catch(noop)
+  }, 500)
+}
+
 /** Is this message (still) in the conversation on this device? */
 export async function hasMessage(conv: ConvId, id: string): Promise<boolean> {
   const s = requireSession()
@@ -2631,12 +2822,68 @@ export async function loadOlder(): Promise<boolean> {
   return true
 }
 
-/** Searches the message history on this device. All words must match; newest first. `conv` limits it to one chat. */
+/** Start of a day (local time) from "2026-11-19", "19-11-2026" or "19/11/2026"; NaN if it isn't a date. */
+function parseDay(v: string): number {
+  let m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(v)
+  let y: number, mo: number, d: number
+  if (m) [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  else if ((m = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/.exec(v))) [d, mo, y] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  else if (v === 'today' || v === 'yesterday') {
+    const t = new Date()
+    t.setHours(0, 0, 0, 0)
+    return v === 'today' ? t.getTime() : new Date(t.getFullYear(), t.getMonth(), t.getDate() - 1).getTime()
+  } else return NaN
+  const date = new Date(y, mo - 1, d)
+  return date.getMonth() === mo - 1 && date.getDate() === d ? date.getTime() : NaN
+}
+
+/** Start of the day after `day` (handles daylight saving changes). */
+const nextDay = (day: number) => {
+  const d = new Date(day)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime()
+}
+
+/**
+ * Searches the message history on this device; newest first. `conv` limits it to one chat.
+ * All words must match. Filters: from:name (or from:me), has:image|video|file|link,
+ * before:date, after:date, on:date (2026-11-19, 19-11-2026, today, yesterday). Quote names with spaces: from:"bob smith".
+ */
 export async function search(query: string, opts: { conv?: ConvId; limit?: number } = {}): Promise<SearchHit[]> {
   const s = requireSession()
   const limit = opts.limit ?? 50
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
-  if (!terms.length) return []
+  const terms: string[] = []
+  const from: string[][] = []
+  const has: string[] = []
+  let after = -Infinity
+  let before = Infinity
+  for (const m of query.matchAll(/(\w+):"([^"]*)"?|(\S+)/g)) {
+    const [key, val] = m[1] !== undefined ? [m[1].toLowerCase(), m[2]!] : m[3]!.includes(':') ? [m[3]!.slice(0, m[3]!.indexOf(':')).toLowerCase(), m[3]!.slice(m[3]!.indexOf(':') + 1)] : ['', m[3]!]
+    const v = val.toLowerCase().replace(/^@/, '')
+    // A filter still being typed ("from:") narrows nothing yet.
+    if (!v && ['from', 'has', 'before', 'after', 'on', 'during'].includes(key)) continue
+    if (key === 'from') {
+      // Everyone whose name or username starts with it.
+      const ids = v === 'me' ? [s.me] : [s.me, ...Object.keys(state.contacts)].filter((id) => {
+        const c = state.contacts[id]
+        const names = id === s.me ? [s.saved.username, s.profile.name ?? ''] : [c?.name ?? '', c?.username ?? '']
+        return names.some((n) => n.toLowerCase().startsWith(v))
+      })
+      from.push(ids)
+    } else if (key === 'has' && ['image', 'video', 'file', 'link'].includes(v.replace(/s$/, ''))) {
+      has.push(v.replace(/s$/, ''))
+    } else if ((key === 'before' || key === 'after' || key === 'on' || key === 'during') && !Number.isNaN(parseDay(v))) {
+      const day = parseDay(v)
+      if (key === 'before') before = Math.min(before, day)
+      else if (key === 'after') after = Math.max(after, nextDay(day))
+      else {
+        after = Math.max(after, day)
+        before = Math.min(before, nextDay(day))
+      }
+    } else if (m[0]) {
+      terms.push(...m[0].toLowerCase().split(/\s+/).filter(Boolean))
+    }
+  }
+  if (!terms.length && !from.length && !has.length && after === -Infinity && before === Infinity) return []
   const hits: SearchHit[] = []
   for (const c of state.conversations) {
     if (opts.conv && c.id !== opts.conv) continue
@@ -2644,8 +2891,14 @@ export async function search(query: string, opts: { conv?: ConvId; limit?: numbe
     const list = cached ? await cached : ((await get<ChatMessage[]>(K.conv(c.id), db)) ?? [])
     if (session !== s) return []
     for (const m of list) {
-      if (m.kind === 'system') continue
-      const text = (m.kind === 'file' ? (m.file?.name ?? '') : docToText(m.doc)).toLowerCase()
+      if (m.kind === 'system' || m.ts < after || m.ts >= before) continue
+      if (from.some((ids) => !ids.includes(m.from))) continue
+      const mime = m.kind === 'file' ? (m.file?.mime ?? '') : ''
+      const body = m.kind === 'file' ? (m.file?.name ?? '') : docToText(m.doc)
+      if (has.some((h) =>
+        h === 'image' ? !mime.startsWith('image/') : h === 'video' ? !mime.startsWith('video/') : h === 'file' ? m.kind !== 'file' : !/https?:\/\/|www\./i.test(body),
+      )) continue
+      const text = body.toLowerCase()
       if (terms.every((t) => text.includes(t))) hits.push({ conv: c.id, title: c.title, msg: m })
     }
   }
@@ -2789,7 +3042,6 @@ export async function fileUrl(msg: ChatMessage): Promise<string | null> {
 export async function createGroup(nameInput: string, members: string[]): Promise<ConvId> {
   const s = requireSession()
   const name = cleanLabel(nameInput, 64)
-  if (!name) throw new Error('Give the group a name')
   const others = [...new Set(members)].filter((id) => validId(id) && id !== s.me && state.contacts[id]?.friend)
   if (others.length === 0) throw new Error('Pick at least one friend')
   const group: Group = { id: randomId(), name, members: [s.me, ...others], admins: [s.me] }
@@ -2797,7 +3049,8 @@ export async function createGroup(nameInput: string, members: string[]): Promise
   state.groups[group.id] = group
   groupsChanged(s)
   const conv: ConvId = `g:${group.id}`
-  await systemMessage(s, conv, `You created “${name}” with ${names(others)}`)
+  applyGroupDefault(s, conv)
+  await systemMessage(s, conv, name ? `You created “${name}” with ${names(others)}` : `You created a group with ${names(others)}`)
   await openConv(conv)
   return conv
 }
@@ -2974,13 +3227,31 @@ export function shouldNotify(m: ChatMessage): boolean {
   return !p?.mentions || mentionsMe(s, m)
 }
 
-/** Whether others see when I've read their messages. My own devices always sync read state. */
-export function setReadReceipts(on: boolean) {
-  const s = requireSession()
-  s.settings = { readReceipts: on, at: Date.now() }
-  state.settings = { readReceipts: on }
+function showSettings(s: Session) {
+  state.settings = { readReceipts: s.settings.readReceipts, groupMentions: !!s.settings.groupMentions }
+}
+
+function changeSettings(s: Session, patch: Partial<Omit<Settings, 'at'>>) {
+  s.settings = { ...s.settings, ...patch, at: Math.max(Date.now(), s.settings.at + 1) }
+  if (!s.settings.groupMentions) delete s.settings.groupMentions
+  showSettings(s)
   scheduleFlush(s)
   scheduleVaultPush(s)
+}
+
+/** Whether others see when I've read their messages. My own devices always sync read state. */
+export function setReadReceipts(on: boolean) {
+  changeSettings(requireSession(), { readReceipts: on })
+}
+
+/** Whether groups I create or am added to from now on start as "notify for mentions only". Synced to my devices. */
+export function setGroupMentionsDefault(on: boolean) {
+  changeSettings(requireSession(), { groupMentions: on })
+}
+
+/** A new group gets my default notification level. */
+function applyGroupDefault(s: Session, conv: ConvId) {
+  if (s.settings.groupMentions && !s.prefs[conv]) setPrefs(s, conv, { mentions: true })
 }
 
 /** A square part of an image, in the image's own pixels. */

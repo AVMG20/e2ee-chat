@@ -1,19 +1,21 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Archive, AtSign, BellOff, Check, ChevronRight, ChevronDown, Copy, Hash, Loader2, Moon, Pin, Plus, Search, Sun, TriangleAlert, UserPlus, Users } from 'lucide-vue-next'
+import { Archive, AtSign, Bell, BellOff, Check, ChevronRight, ChevronDown, Copy, Hash, Loader2, MessageSquareText, Moon, Pin, Plus, Search, Star, Sun, TriangleAlert, UserPlus, Users, X } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import NewGroupDialog from '@/components/NewGroupDialog.vue'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import EntryMenu from '@/components/shell/EntryMenu.vue'
 import StillImg from '@/components/StillImg.vue'
+import UnreadBadge from '@/components/shell/UnreadBadge.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { drafts } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
 import { errMsg, relTime } from '@/lib/format'
-import { openConversation, openFriends, showConv } from '@/lib/nav'
+import { openConversation, openFriends, showConv, view } from '@/lib/nav'
+import { dismissNotifyPrompt, notifyDenied, notifyEnabled, notifyPromptDismissed, notifySupported, setNotify } from '@/lib/notify'
 import { docToText } from '@/lib/render'
 import { isDark, toggleTheme } from '@/lib/theme'
-import { accountOpen, muteTitle, paletteOpen, useCopy } from '@/lib/ui'
+import { accountOpen, isMac, muteTitle, openStarredAll, paletteOpen, statusTextOpen, useCopy } from '@/lib/ui'
 import type { Conversation } from '@/lib/types'
 import type { UserStatus } from '@/lib/chat'
 
@@ -37,7 +39,25 @@ const groupOpen = ref(false)
 const { copied, copy } = useCopy()
 const incomingCount = computed(() => chat.state.requests.incoming.length)
 const myId = computed(() => chat.formatId(chat.state.account?.id ?? ''))
-const isMac = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.platform)
+
+// Web only: offer to turn notifications on once there is someone to hear from.
+const showNotifyPrompt = computed(
+  () => !chat.isDesktop && notifySupported && !notifyEnabled.value && !notifyDenied.value && !notifyPromptDismissed.value
+    && (chat.state.conversations.length > 0 || Object.values(chat.state.contacts).some((c) => c.friend)),
+)
+async function enableNotify() {
+  if (await setNotify(true)) toast.success('Notifications are on')
+  else if (notifyDenied.value) toast.error('Notifications are blocked. Allow them in your browser settings.')
+}
+
+/** The preview line of a chat in another conversation where people are typing right now, or ''. */
+function typingText(c: Conversation): string {
+  if (c.id === chat.state.active && view.value === 'chats') return ''
+  const names = (chat.state.typing[c.id] ?? []).map((id) => chat.displayName(id))
+  if (!names.length) return ''
+  if (names.length === 1) return `${names[0]} is typing…`
+  return names.length <= 2 ? `${names.join(', ')} are typing…` : 'Several people are typing…'
+}
 
 // chat.state.conversations is already newest-first; keep that order within each section.
 const active = computed(() => chat.state.conversations.filter((c) => !c.archived))
@@ -79,6 +99,7 @@ async function select(c: Conversation) {
           <Users />
           <span v-if="incomingCount" class="unread absolute -top-1 -right-1 !bg-destructive">{{ incomingCount }}</span>
         </button>
+        <button class="btn btn-ghost btn-icon btn-sm" title="Starred messages" aria-label="Starred messages" @click="openStarredAll"><Star /></button>
         <button class="btn btn-ghost btn-icon btn-sm" aria-label="Toggle theme" @click="toggleTheme"><Sun v-if="isDark" /><Moon v-else /></button>
       </div>
     </div>
@@ -92,6 +113,13 @@ async function select(c: Conversation) {
       <span class="flex-1 font-semibold">{{ incomingCount }} friend {{ incomingCount === 1 ? 'request' : 'requests' }}</span>
       <ChevronRight class="size-4 text-muted-foreground" />
     </button>
+
+    <div v-if="showNotifyPrompt" class="mx-2 mt-2 flex items-center gap-2 rounded-md bg-primary/15 py-1.5 pr-1 pl-2.5 text-[13px]" role="region" aria-label="Notifications">
+      <Bell class="size-4 shrink-0 text-primary" />
+      <span class="min-w-0 flex-1 leading-tight">Get notified of new messages</span>
+      <button class="btn btn-primary btn-sm !h-7 shrink-0" @click="enableNotify">Enable</button>
+      <button class="btn btn-ghost btn-icon btn-sm !size-7 shrink-0" title="Not now" aria-label="Dismiss" @click="dismissNotifyPrompt"><X class="!size-4" /></button>
+    </div>
 
     <div v-if="chat.state.syncing" class="mx-3 mt-2 flex items-center gap-2 text-xs text-muted-foreground" role="status">
       <Loader2 class="size-3.5 animate-spin" />Syncing messages…
@@ -121,11 +149,12 @@ async function select(c: Conversation) {
                     <span class="shrink-0 text-[11px] font-normal text-muted-foreground">{{ relTime(c.lastTs) }}</span>
                   </span>
                   <span class="mt-0.5 flex items-center gap-1.5">
-                    <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground"><template v-if="draftOf(c)"><span class="font-semibold text-destructive">Draft:</span> {{ draftOf(c) }}</template><template v-else>{{ c.preview }}</template></span>
+                    <span v-if="typingText(c)" class="min-w-0 flex-1 truncate text-xs font-medium text-primary">{{ typingText(c) }}</span>
+                    <span v-else class="min-w-0 flex-1 truncate text-xs text-muted-foreground"><template v-if="draftOf(c)"><span class="font-semibold text-destructive">Draft:</span> {{ draftOf(c) }}</template><template v-else>{{ c.preview }}</template></span>
                     <Pin v-if="c.pinned" class="size-3 shrink-0 text-muted-foreground" aria-label="Pinned" />
                     <BellOff v-if="c.muted" class="size-3 shrink-0 text-muted-foreground" :aria-label="muteTitle(c)" :title="muteTitle(c)" />
                     <AtSign v-else-if="c.mentionsOnly" class="size-3 shrink-0 text-muted-foreground" :aria-label="muteTitle(c)" :title="muteTitle(c)" />
-                    <span v-if="c.unread > 0" class="unread shrink-0" :class="c.muted && '!bg-zinc-500'">{{ c.unread > 99 ? '99+' : c.unread }}</span>
+                    <UnreadBadge :conv="c" />
                   </span>
                 </span>
               </button>
@@ -156,11 +185,12 @@ async function select(c: Conversation) {
                     <span class="shrink-0 text-[11px] font-normal text-muted-foreground">{{ relTime(c.lastTs) }}</span>
                   </span>
                   <span class="mt-0.5 flex items-center gap-1.5">
-                    <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground"><template v-if="draftOf(c)"><span class="font-semibold text-destructive">Draft:</span> {{ draftOf(c) }}</template><template v-else>{{ c.preview }}</template></span>
+                    <span v-if="typingText(c)" class="min-w-0 flex-1 truncate text-xs font-medium text-primary">{{ typingText(c) }}</span>
+                    <span v-else class="min-w-0 flex-1 truncate text-xs text-muted-foreground"><template v-if="draftOf(c)"><span class="font-semibold text-destructive">Draft:</span> {{ draftOf(c) }}</template><template v-else>{{ c.preview }}</template></span>
                     <Pin v-if="c.pinned" class="size-3 shrink-0 text-muted-foreground" aria-label="Pinned" />
                     <BellOff v-if="c.muted" class="size-3 shrink-0 text-muted-foreground" :aria-label="muteTitle(c)" :title="muteTitle(c)" />
                     <AtSign v-else-if="c.mentionsOnly" class="size-3 shrink-0 text-muted-foreground" :aria-label="muteTitle(c)" :title="muteTitle(c)" />
-                    <span v-if="c.unread > 0" class="unread shrink-0" :class="c.muted && '!bg-zinc-500'">{{ c.unread > 99 ? '99+' : c.unread }}</span>
+                    <UnreadBadge :conv="c" />
                   </span>
                 </span>
               </button>
@@ -190,7 +220,7 @@ async function select(c: Conversation) {
                 <StillImg v-else-if="c.avatar" :src="c.avatar" :still="chat.state.active !== c.id" class="size-8 shrink-0 rounded-full object-cover" />
                 <span v-else class="flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><Hash class="size-4" /></span>
                 <span class="min-w-0 flex-1 truncate text-[15px] font-medium">{{ c.title }}</span>
-                <span v-if="c.unread > 0" class="unread shrink-0" :class="c.muted && '!bg-zinc-500'">{{ c.unread > 99 ? '99+' : c.unread }}</span>
+                <UnreadBadge :conv="c" />
               </button>
             </EntryMenu>
           </li>
@@ -204,7 +234,8 @@ async function select(c: Conversation) {
         <UserAvatar :name="chat.state.account?.displayName ?? '?'" :id="chat.state.account?.id" :src="chat.state.account?.avatar" :size="32" :online="chat.state.status === 'online'" still />
         <span class="min-w-0 flex-1 leading-tight">
           <span class="block truncate text-[13px] font-semibold">{{ chat.state.account?.displayName }}</span>
-          <span class="block truncate font-mono text-[11px] text-muted-foreground">{{ copied ? 'ID copied' : myId }}</span>
+          <span v-if="chat.state.account?.note && !copied" class="block truncate text-[11px] text-muted-foreground" :title="chat.state.account.note">{{ chat.state.account.note }}</span>
+          <span v-else class="block truncate font-mono text-[11px] text-muted-foreground">{{ copied ? 'ID copied' : myId }}</span>
         </span>
       </button>
       <DropdownMenu>
@@ -222,6 +253,11 @@ async function select(c: Conversation) {
               <span v-if="o.hint" class="block text-xs text-muted-foreground">{{ o.hint }}</span>
             </span>
             <Check v-if="chat.state.account?.status === o.value" class="size-4" />
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem @select="statusTextOpen = true">
+            <MessageSquareText class="size-4 shrink-0" />
+            <span class="min-w-0 flex-1 truncate">{{ chat.state.account?.note ? 'Change custom status' : 'Set a custom status' }}</span>
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

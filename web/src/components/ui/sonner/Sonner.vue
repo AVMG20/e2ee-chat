@@ -21,6 +21,8 @@ const delegatedProps = reactiveOmit(props, 'class', 'toastOptions')
   <Sonner
     :class="cn('toaster group', props.class)"
     :style="{
+      // An open dialog makes everything outside it unclickable (pointer-events: none on body); toasts must stay clickable.
+      'pointer-events': 'auto',
       '--normal-bg': 'var(--popover)',
       '--normal-text': 'var(--popover-foreground)',
       '--normal-border': 'var(--border)',

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Toaster } from '@/components/ui/sonner'
 import LoginScreen from '@/components/LoginScreen.vue'
@@ -7,6 +7,13 @@ import ChatLayout from '@/components/ChatLayout.vue'
 import { chat } from '@/lib/chat'
 
 const booting = ref(true)
+
+// Toasts sit bottom-right on wide screens; on phones bottom-centre, above the composer.
+const wideMedia = window.matchMedia('(min-width: 768px)')
+const wide = ref(wideMedia.matches)
+const onWide = () => (wide.value = wideMedia.matches)
+wideMedia.addEventListener('change', onWide)
+onBeforeUnmount(() => wideMedia.removeEventListener('change', onWide))
 
 onMounted(async () => {
   try {
@@ -38,5 +45,5 @@ watch(
     <ChatLayout v-else-if="chat.state.account" />
     <LoginScreen v-else />
   </div>
-  <Toaster position="top-center" />
+  <Toaster :position="wide ? 'bottom-right' : 'bottom-center'" :offset="wide ? 24 : 80" />
 </template>

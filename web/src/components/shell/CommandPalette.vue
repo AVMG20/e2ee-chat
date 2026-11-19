@@ -107,7 +107,7 @@ const total = computed(() => results.value.length + hits.value.length)
 /** A short excerpt around the first matching word, split into plain and matched parts. */
 function snippet(hit: SearchHit): { t: string; m: boolean }[] {
   const text = chat.previewText(hit.msg).replace(/\s+/g, ' ')
-  const terms = query.value.toLowerCase().split(/\s+/).filter(Boolean)
+  const terms = query.value.toLowerCase().split(/\s+/).filter((t) => t && !/^(from|has|before|after|on|during):/.test(t))
   const lower = text.toLowerCase()
   const first = Math.min(...terms.map((t) => lower.indexOf(t)).filter((i) => i >= 0), text.length)
   const start = Math.max(0, first - 24)
@@ -161,6 +161,7 @@ async function choose(it: Item | undefined) {
           @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)" @keydown.enter.prevent="choose2(index)"
         >
       </div>
+      <p class="border-b border-line px-4 py-1.5 text-[11px] text-muted-foreground">Narrow messages with <code class="font-mono">from:name</code>, <code class="font-mono">has:image</code>, <code class="font-mono">before:</code> or <code class="font-mono">after:</code>.</p>
       <ul ref="list" class="max-h-[min(22rem,50dvh)] overflow-y-auto p-1.5" role="listbox">
         <li v-for="(it, n) in results" :key="it.id" role="option" :aria-selected="n === index">
           <button

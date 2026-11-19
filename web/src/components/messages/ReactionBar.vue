@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { SmilePlus } from 'lucide-vue-next'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { chat } from '@/lib/chat'
 import type { ChatMessage } from '@/lib/types'
-import { myId, reactTo } from './state'
+import EmojiPicker from './EmojiPicker.vue'
+import { myId, reactTo, refocusComposer } from './state'
 
 const props = defineProps<{ msg: ChatMessage }>()
+
+const pickerOpen = ref(false)
 
 const items = computed(() =>
   Object.entries(props.msg.reactions ?? {})
@@ -34,5 +38,13 @@ const items = computed(() =>
       </TooltipTrigger>
       <TooltipContent>{{ r.names }} reacted with {{ r.emoji }}</TooltipContent>
     </Tooltip>
+    <EmojiPicker v-model:open="pickerOpen" quick side="top" align="start" @pick="(e) => (reactTo(msg, e), refocusComposer())">
+      <button
+        type="button" title="Add reaction" aria-label="Add reaction"
+        class="flex h-6 items-center rounded-md bg-soft px-1.5 text-muted-foreground outline-none transition-colors hover:bg-active hover:text-foreground focus-visible:shadow-[var(--glow)]"
+      >
+        <SmilePlus class="size-3.5" />
+      </button>
+    </EmojiPicker>
   </div>
 </template>

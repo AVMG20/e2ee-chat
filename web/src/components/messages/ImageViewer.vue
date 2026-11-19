@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, Download, ImageOff, X } from 'lucide-vue-next'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
-import { viewerId, viewerList } from '@/components/messages/state'
+import { refocusComposer, viewerId, viewerList } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
 import { formatSize } from '@/lib/format'
 
@@ -16,6 +16,15 @@ const open = computed({
     if (!v) viewerId.value = null
   },
 })
+
+// Opened from the chat itself (not the media gallery)? Then closing puts the cursor back in the message box.
+let fromChat = false
+watch(open, (o) => o && (fromChat = !viewerList.value), { flush: 'sync' })
+function onCloseFocus(e: Event) {
+  if (!fromChat) return
+  e.preventDefault()
+  refocusComposer()
+}
 
 const url = ref<string | null>(null)
 const failed = ref(false)
@@ -65,7 +74,7 @@ const bar = 'flex size-10 items-center justify-center rounded-full bg-white/10 t
     <DialogContent
       :show-close-button="false" aria-describedby=""
       class="inset-0 top-0 left-0 h-dvh max-h-none w-screen max-w-none translate-x-0 translate-y-0 gap-0 !rounded-none !border-0 !bg-black/90 !p-0 !shadow-none sm:max-w-none"
-      @click="open = false"
+      @click="open = false" @close-auto-focus="onCloseFocus"
     >
       <DialogTitle class="sr-only">{{ cur?.file?.name ?? 'Image' }}</DialogTitle>
       <DialogDescription class="sr-only">Full-size image viewer. Use the arrow keys to move between images.</DialogDescription>

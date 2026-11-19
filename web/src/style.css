@@ -345,3 +345,19 @@
 .hue-bg { background: oklch(0.6 0.13 var(--h)); color: white; }
 .hue-text { color: oklch(0.5 0.15 var(--h)); }
 .dark .hue-text { color: oklch(0.8 0.1 var(--h)); }
+
+/* Spoilers: hidden in messages until clicked; shown with a faint box while composing. */
+.prose-like .spoiler { border-radius: 0.25rem; }
+.composer-editor .spoiler { background: color-mix(in srgb, currentColor 14%, transparent); }
+.prose-like:not(.composer-editor) .spoiler:not(.revealed) {
+  cursor: pointer;
+  color: transparent;
+  background: color-mix(in srgb, var(--foreground) 30%, transparent);
+  -webkit-user-select: none;
+  user-select: none;
+  filter: none;
+}
+.prose-like:not(.composer-editor) .spoiler:not(.revealed) * { color: transparent !important; text-shadow: none; }
+.prose-like:not(.composer-editor) .spoiler:not(.revealed):hover { background: color-mix(in srgb, var(--foreground) 40%, transparent); }
+.prose-like:not(.composer-editor) .spoiler:not(.revealed):focus-visible { box-shadow: var(--glow); outline: none; }
+.prose-like .spoiler.revealed { background: color-mix(in srgb, currentColor 10%, transparent); }

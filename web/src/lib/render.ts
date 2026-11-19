@@ -7,7 +7,7 @@ import { editorExtensions } from './editor'
 
 const ALLOWED_TAGS = [
   'p', 'br', 'strong', 'em', 's', 'u', 'code', 'pre', 'blockquote',
-  'ul', 'ol', 'li', 'a', 'h1', 'h2', 'h3', 'hr',
+  'ul', 'ol', 'li', 'a', 'h1', 'h2', 'h3', 'hr', 'span',
 ]
 
 const isDesktop = '__TAURI_INTERNALS__' in globalThis
@@ -22,10 +22,11 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   node.setAttribute('rel', 'noopener noreferrer nofollow')
 })
 
-// Code blocks keep their language as class="language-xyz" (nothing else may use class).
+// Code blocks keep their language as class="language-xyz", spoilers keep class="spoiler" (nothing else may use class).
 const LANG_CLASS = /^language-([\w+#-]{1,20})$/
 DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
-  if (data.attrName === 'class') data.keepAttr = node.tagName === 'CODE' && LANG_CLASS.test(data.attrValue)
+  if (data.attrName !== 'class') return
+  data.keepAttr = (node.tagName === 'CODE' && LANG_CLASS.test(data.attrValue)) || (node.tagName === 'SPAN' && data.attrValue === 'spoiler')
 })
 
 /** Links bare http(s) URLs in plain text (Tiptap only autolinks after a following space, and Enter sends). */
@@ -141,6 +142,12 @@ export function renderMessageHtml(doc: JSONContent | undefined, people: Mentiona
     ALLOWED_URI_REGEXP: /^(?:https?:|mailto:)/i,
     RETURN_DOM_FRAGMENT: true,
   })
+  // Spoilers are click-to-reveal buttons for keyboard and screen reader users (attributes are added here, after sanitizing).
+  for (const sp of frag.querySelectorAll('span.spoiler')) {
+    sp.setAttribute('role', 'button')
+    sp.setAttribute('tabindex', '0')
+    sp.setAttribute('aria-label', 'Spoiler, press to reveal')
+  }
   linkifyBareUrls(frag)
   markMentions(frag, people)
   // Syntax highlighting: highlight.js escapes the code text and only adds <span class="hljs-…">.
@@ -158,7 +165,10 @@ export function renderMessageHtml(doc: JSONContent | undefined, people: Mentiona
   return box.innerHTML
 }
 
-/** Plain-text version of a message doc (for previews/notifications). */
+/** Stands in for spoiler text in previews and notifications. */
+const SPOILER_MASK = '•••'
+
+/** Plain-text version of a message doc (for previews/notifications). Spoiler text is hidden. */
 export function docToText(doc: JSONContent | undefined): string {
   if (!doc) return ''
   const parts: string[] = []
@@ -172,7 +182,9 @@ export function docToText(doc: JSONContent | undefined): string {
       continue
     }
     if (!n || typeof n !== 'object') continue
-    if (n.type === 'text' && typeof n.text === 'string') parts.push(n.text)
+    if (n.type === 'text' && typeof n.text === 'string') {
+      parts.push(n.marks?.some((m) => m.type === 'spoiler') ? SPOILER_MASK : n.text)
+    }
     if (n.type === 'hardBreak') parts.push(' ')
     if (n.type === 'paragraph' || n.type === 'listItem') stack.push(' ')
     if (Array.isArray(n.content)) for (let i = n.content.length - 1; i >= 0; i--) stack.push(n.content[i]!)

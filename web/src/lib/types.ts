@@ -13,6 +13,8 @@ export interface Account {
   avatar: string | null
   /** My status: online, away, dnd (do not disturb) or invisible (I look offline to friends). */
   status: 'online' | 'away' | 'dnd' | 'invisible'
+  /** My status text ("in a meeting until 3"), or ''. Set with chat.setStatusText. */
+  note: string
   /** My security code (8 groups of 5 digits): friends compare it with what they see for me. */
   fingerprint: string
 }
@@ -32,6 +34,8 @@ export interface Contact {
   online: boolean
   /** What their dot shows: online (green), away (yellow), dnd (red), offline (also when invisible). Friends only. */
   status: 'online' | 'away' | 'dnd' | 'offline'
+  /** Their status text, or ''. */
+  note: string
   /** Fingerprint of the key pinned for this contact (shown for out-of-band verification). */
   fingerprint: string
   /** User marked this contact's fingerprint as verified in person. */
@@ -103,6 +107,8 @@ export interface Conversation {
   kind: 'dm' | 'group'
   title: string
   unread: number
+  /** How many of the unread messages mention or reply to me (show as a red @ badge). */
+  mentions: number
   lastTs: number
   /** Preview of the last message (plain text). */
   preview: string

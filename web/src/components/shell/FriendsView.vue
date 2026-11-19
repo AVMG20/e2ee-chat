@@ -8,7 +8,7 @@ import EntryMenu from '@/components/shell/EntryMenu.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { friendsTab as tab, openDm, pendingAction, showChats, type FriendsTab } from '@/lib/nav'
-import { sendFriendRequestToast } from '@/lib/ui'
+import { sendFriendRequestToast, statusLine } from '@/lib/ui'
 import type { Contact } from '@/lib/types'
 
 const incoming = computed(() => chat.state.requests.incoming)
@@ -52,7 +52,7 @@ async function add() {
   try {
     const raw = input.value
     const target = raw.toUpperCase().replace(/[^0-9A-Z]/g, '').replace(/[IL]/g, '1').replace(/O/g, '0')
-    await sendFriendRequestToast(target, chat.state.contacts[target]?.name ?? chat.state.requests.incoming.find((r) => r.id === target)?.name ?? raw.trim())
+    await sendFriendRequestToast(target, chat.state.contacts[target]?.name ?? chat.state.requests.incoming.find((r) => r.id === target)?.name)
     input.value = ''
   } catch (e) {
     addError.value = errMsg(e)
@@ -137,7 +137,7 @@ function openMenu(e: MouseEvent) {
                       <TriangleAlert v-if="c.keyChanged" class="size-4 shrink-0 text-destructive" aria-label="Security key changed" />
                     </div>
                     <div class="truncate text-xs text-muted-foreground">
-                      {{ c.online ? 'Online' : 'Offline' }} · <span class="font-mono">{{ chat.formatId(c.id) }}</span>
+                      {{ statusLine(c) }} · <span class="font-mono">{{ chat.formatId(c.id) }}</span>
                     </div>
                   </div>
                   <button class="btn btn-soft btn-sm" @click="message(c)"><MessageSquare /><span class="hidden sm:inline">Message</span></button>

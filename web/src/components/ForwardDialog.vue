@@ -6,7 +6,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
-import { forwardMsg } from '@/components/messages/state'
+import { forwardMsg, refocusComposer } from '@/components/messages/state'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
@@ -57,7 +57,7 @@ async function submit() {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent>
+    <DialogContent @close-auto-focus="(e: Event) => (e.preventDefault(), refocusComposer())">
       <form class="grid gap-4" @submit.prevent="submit">
         <DialogHeader>
           <div class="mb-2 flex size-11 items-center justify-center rounded-lg text-white [background:var(--grad)]"><Forward class="size-5" /></div>

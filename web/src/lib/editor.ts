@@ -1,4 +1,22 @@
+import { Mark, markInputRule, markPasteRule } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
+
+/**
+ * ||text|| hides the text until the reader clicks it. Stored as a mark in the message document,
+ * rendered as <span class="spoiler"> (the only class DOMPurify lets through on a span, see render.ts).
+ */
+export const Spoiler = Mark.create({
+  name: 'spoiler',
+  inclusive: false,
+  parseHTML: () => [{ tag: 'span.spoiler' }],
+  renderHTML: () => ['span', { class: 'spoiler' }, 0],
+  addInputRules() {
+    return [markInputRule({ find: /(?:^|\s)(\|\|(?!\s)([^|]+?)\|\|)$/, type: this.type })]
+  },
+  addPasteRules() {
+    return [markPasteRule({ find: /(?:^|\s)(\|\|(?!\s)([^|]+?)\|\|)/g, type: this.type })]
+  },
+})
 
 /**
  * The single Tiptap schema used for both composing and rendering messages.
@@ -15,5 +33,6 @@ export function editorExtensions() {
         HTMLAttributes: { target: '_blank', rel: 'noopener noreferrer nofollow' },
       },
     }),
+    Spoiler,
   ]
 }

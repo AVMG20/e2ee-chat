@@ -11,7 +11,7 @@ import AvatarCropDialog from '@/components/AvatarCropDialog.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { addMembersGroup, pendingAction } from '@/lib/nav'
-import { MUTE_OPTIONS, friendState, muteFor, openUser, panelUser, sendFriendRequestToast, setPrefs, trustNewKey } from '@/lib/ui'
+import { MUTE_OPTIONS, friendState, muteFor, openUser, panelUser, sendFriendRequestToast, setPrefs, statusLabel, trustNewKey } from '@/lib/ui'
 
 const conv = computed(() => chat.state.conversations.find((c) => c.id === chat.state.active) ?? null)
 const dmId = computed(() => (conv.value?.kind === 'dm' ? conv.value.id.slice(3) : null))
@@ -118,7 +118,7 @@ async function trust() {
             <Loader2 v-if="picBusy" class="size-6 animate-spin" /><Camera v-else class="size-6" />
           </span>
         </button>
-        <h3 class="max-w-full truncate text-lg font-bold">{{ group.name }}</h3>
+        <h3 class="max-w-full truncate text-lg font-bold">{{ conv.title }}</h3>
         <div class="flex gap-3 text-xs">
           <button class="text-[var(--link)] hover:underline disabled:opacity-50" :disabled="picBusy" @click="picPicker?.click()">Change picture</button>
           <button v-if="conv.avatar" class="inline-flex items-center gap-1 text-muted-foreground hover:text-destructive hover:underline disabled:opacity-50" :disabled="picBusy" @click="savePic(null)"><Trash2 class="size-3" />Remove</button>
@@ -168,7 +168,8 @@ async function trust() {
         <UserAvatar :name="userName" :id="userId" :src="contact?.avatar" :size="96" :online="contact?.friend ? !!contact.online : undefined" />
         <h3 class="max-w-full truncate text-lg font-bold">{{ userName }}</h3>
         <p v-if="contact && contact.username !== contact.name" class="max-w-full truncate text-sm text-muted-foreground">@{{ contact.username }}</p>
-        <p v-if="contact?.friend" class="text-xs text-muted-foreground">{{ contact.online ? 'Online' : 'Offline' }}</p>
+        <p v-if="contact?.friend" class="text-xs text-muted-foreground">{{ statusLabel(contact.status) }}</p>
+        <p v-if="contact?.note" class="max-w-full break-words rounded-md bg-soft px-2.5 py-1 text-sm">{{ contact.note }}</p>
         <div class="flex items-center gap-2">
           <span class="font-mono text-sm font-semibold tracking-[0.1em]">{{ chat.formatId(userId) }}</span>
           <CopyIdButton :id="userId" class="btn-icon" />

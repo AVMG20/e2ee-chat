@@ -1,6 +1,14 @@
 <script setup lang="ts">
 import { X } from 'lucide-vue-next'
+import { chat } from '@/lib/chat'
+import { showConv } from '@/lib/nav'
 import { sidePanel } from '@/lib/ui'
+
+/** Closes the panel. On a phone with no chat open (the starred view), that goes back to the chat list. */
+function close() {
+  sidePanel.value = null
+  if (!chat.state.active && !window.matchMedia('(min-width: 768px)').matches) showConv.value = false
+}
 
 /** Right-hand panel shell: header with title and close button, scrolling body in the default slot. */
 defineProps<{ title: string }>()
@@ -13,7 +21,7 @@ defineProps<{ title: string }>()
   >
     <header class="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4 shadow-sm">
       <h2 class="min-w-0 flex-1 truncate text-[15px] font-bold">{{ title }}</h2>
-      <button class="btn btn-ghost btn-icon btn-sm" title="Close panel (Esc)" aria-label="Close panel" @click="sidePanel = null"><X /></button>
+      <button class="btn btn-ghost btn-icon btn-sm" title="Close panel (Esc)" aria-label="Close panel" @click="close"><X /></button>
     </header>
     <div class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-3"><slot /></div>
   </aside>

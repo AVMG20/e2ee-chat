@@ -28,12 +28,19 @@ watch(open, (o) => {
   }
 })
 
+/** What the group will be called if no name is typed: its members' names. */
+const defaultTitle = computed(() => {
+  const names = selected.value.map((id) => chat.displayName(id))
+  if (!names.length) return 'Members\' names'
+  return names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ')
+})
+
 function toggle(n: string, on: boolean | 'indeterminate') {
   selected.value = on === true ? [...selected.value, n] : selected.value.filter((x) => x !== n)
 }
 
 async function submit() {
-  if (!name.value.trim() || !selected.value.length) return
+  if (!selected.value.length) return
   busy.value = true
   try {
     await chat.createGroup(name.value.trim(), selected.value)
@@ -54,11 +61,11 @@ async function submit() {
         <DialogHeader>
           <div class="mb-2 flex size-11 items-center justify-center rounded-lg text-white [background:var(--grad)]"><Users class="size-5" /></div>
           <DialogTitle>New group</DialogTitle>
-          <DialogDescription>Pick a name and at least one member.</DialogDescription>
+          <DialogDescription>Pick at least one member. A name is optional: without one, the group is called after its members.</DialogDescription>
         </DialogHeader>
         <div>
-          <label class="label" for="group-name">Group name</label>
-          <input id="group-name" v-model="name" class="field" maxlength="64" autocomplete="off" placeholder="e.g. Weekend plans">
+          <label class="label" for="group-name">Group name <span class="font-normal text-muted-foreground">(optional)</span></label>
+          <input id="group-name" v-model="name" class="field" maxlength="64" autocomplete="off" :placeholder="selected.length ? defaultTitle : 'e.g. Weekend plans'">
         </div>
         <div>
           <div class="label">Members <span v-if="selected.length" class="text-primary">· {{ selected.length }} selected</span></div>
@@ -72,7 +79,7 @@ async function submit() {
           </div>
         </div>
         <DialogFooter>
-          <button type="submit" class="btn btn-primary" :disabled="busy || !name.trim() || !selected.length">
+          <button type="submit" class="btn btn-primary" :disabled="busy || !selected.length">
             <Loader2 v-if="busy" class="animate-spin" />Create group
           </button>
         </DialogFooter>
