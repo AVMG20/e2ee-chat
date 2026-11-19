@@ -29,6 +29,17 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ jump: [id: string] }>()
 
+/** People in this chat, by every name they go by, so their @mentions are clickable. */
+const mentionable = computed(() => {
+  const conv = props.msg.conv
+  const ids = conv.startsWith('g:') ? chat.state.groups[conv.slice(2)]?.members ?? [] : [conv.slice(3), myId()]
+  return ids.map((id) => {
+    const me = id === chat.state.account?.id
+    const c = chat.state.contacts[id]
+    return { id, names: me ? [chat.state.account!.username, chat.state.account!.displayName] : [c?.username ?? '', c?.name ?? chat.displayName(id)] }
+  })
+})
+
 const avatarOf = (id: string) =>
   id === chat.state.account?.id ? chat.state.account.avatar : chat.state.contacts[id]?.avatar ?? null
 const mine = computed(() => props.msg.from === myId())
@@ -46,7 +57,7 @@ const copyMsg = () => copyText(chat.copyText(props.msg), 'Copied')
 
 const html = computed(() => {
   if (props.msg.kind !== 'text') return ''
-  let h = renderMessageHtml(props.msg.doc)
+  let h = renderMessageHtml(props.msg.doc, mentionable.value)
   if (props.msg.edited) {
     // Static trusted markup appended after the sanitized HTML, inline in the last paragraph.
     const tag = '<span class="ml-1 text-[11px] text-muted-foreground select-none">(edited)</span>'
@@ -84,6 +95,11 @@ watch(html, async () => {
 })
 
 function onBodyClick(e: MouseEvent) {
+  const mention = (e.target as HTMLElement).closest<HTMLElement>('.mention')
+  if (mention?.dataset.uid) {
+    openUser(mention.dataset.uid)
+    return
+  }
   const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.copy-code')
   if (!btn) return
   const code = btn.closest('pre')?.querySelector('code')?.textContent ?? ''

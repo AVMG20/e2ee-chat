@@ -289,6 +289,12 @@
 }
 .prose-like > * + * { margin-top: 0.4em; }
 .prose-like p { margin: 0; }
+.prose-like .mention {
+  border-radius: 0.25rem; padding: 0 0.15rem; cursor: pointer; font-weight: 500;
+  color: var(--link); background: color-mix(in srgb, var(--primary) 18%, transparent);
+  transition: background-color 0.12s;
+}
+.prose-like .mention:hover { background: color-mix(in srgb, var(--primary) 32%, transparent); text-decoration: underline; }
 .prose-like p + p { margin-top: 0.4em; }
 .prose-like ul, .prose-like ol { margin: 0; padding-left: 1.4em; }
 .prose-like ul { list-style: disc; }

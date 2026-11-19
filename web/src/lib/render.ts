@@ -57,6 +57,52 @@ function linkifyBareUrls(frag: DocumentFragment) {
   }
 }
 
+/** Someone who can be @mentioned in a chat: their user ID and the names they go by. */
+export interface Mentionable {
+  id: string
+  names: string[]
+}
+
+const MENTION_ID = /^[0-9A-HJKMNP-TV-Z]{8}$/
+
+/** Wraps "@name" of people in the chat in a clickable mention (longest name first; whole names only). */
+function markMentions(frag: DocumentFragment, people: Mentionable[]) {
+  const names = people
+    .filter((p) => MENTION_ID.test(p.id))
+    .flatMap((p) => p.names.filter(Boolean).map((n) => ({ id: p.id, name: n.toLowerCase() })))
+    .sort((a, b) => b.name.length - a.name.length)
+  if (!names.length) return
+  const walker = document.createTreeWalker(frag, NodeFilter.SHOW_TEXT)
+  const texts: Text[] = []
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (!n.parentElement?.closest('a, code, pre') && (n as Text).data.includes('@')) texts.push(n as Text)
+  }
+  for (const t of texts) {
+    const text = t.data
+    const lower = text.toLowerCase()
+    const out = document.createDocumentFragment()
+    let at = 0
+    for (let i = text.indexOf('@'); i >= 0; i = text.indexOf('@', i + 1)) {
+      if (i < at || (i > 0 && /[\p{L}\p{N}_]/u.test(text[i - 1]!))) continue
+      const hit = names.find(({ name }) => {
+        const after = lower[i + 1 + name.length]
+        return lower.startsWith(name, i + 1) && (after === undefined || !/[\p{L}\p{N}_.]/u.test(after))
+      })
+      if (!hit) continue
+      if (i > at) out.append(text.slice(at, i))
+      const span = document.createElement('span')
+      span.className = 'mention'
+      span.dataset.uid = hit.id
+      span.textContent = text.slice(i, i + 1 + hit.name.length)
+      out.append(span)
+      at = i + 1 + hit.name.length
+    }
+    if (!at) continue
+    if (at < text.length) out.append(text.slice(at))
+    t.replaceWith(out)
+  }
+}
+
 /** Nesting/size limits for docs received from others (keeps rendering cheap and non-recursive-bomb). */
 export const MAX_DOC_DEPTH = 32
 export const MAX_DOC_NODES = 20_000
@@ -80,7 +126,8 @@ export function docWithinLimits(doc: unknown): boolean {
  * Turn a (possibly hostile) Tiptap document from another user into safe HTML.
  * The doc only ever passes through our schema and is then sanitized again.
  */
-export function renderMessageHtml(doc: JSONContent | undefined): string {
+/** `people`: who can be @mentioned in this chat (their mentions become clickable). */
+export function renderMessageHtml(doc: JSONContent | undefined, people: Mentionable[] = []): string {
   if (!doc || doc.type !== 'doc' || !docWithinLimits(doc)) return ''
   let html = ''
   try {
@@ -95,6 +142,7 @@ export function renderMessageHtml(doc: JSONContent | undefined): string {
     RETURN_DOM_FRAGMENT: true,
   })
   linkifyBareUrls(frag)
+  markMentions(frag, people)
   // Syntax highlighting: highlight.js escapes the code text and only adds <span class="hljs-…">.
   for (const pre of frag.querySelectorAll('pre')) {
     pre.classList.add('msg-code')
