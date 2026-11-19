@@ -16,9 +16,9 @@ const scroller = ref<HTMLElement | null>(null)
 const content = ref<HTMLElement | null>(null)
 const atBottom = ref(true)
 let stick = true
-// Only animate messages that arrive after the conversation finished loading.
-const animate = ref(false)
-let animTimer: ReturnType<typeof setTimeout> | undefined
+// Only messages that arrive while the chat is open slide in. Decided per message when it's first
+// rendered: turning the animation on later for messages already on screen replays it for all of them.
+let openedAt = Date.now()
 let flashTimer: ReturnType<typeof setTimeout> | undefined
 let pendingUnread = false
 let unreadTimer: ReturnType<typeof setTimeout> | undefined
@@ -156,12 +156,10 @@ watch(
     atBottom.value = true
     unreadSeen = false
     unreadAbove.value = false
-    animate.value = false
+    openedAt = Date.now()
     pendingUnread = true
     clearTimeout(unreadTimer)
     unreadTimer = setTimeout(() => (pendingUnread = false), 1500)
-    clearTimeout(animTimer)
-    animTimer = setTimeout(() => (animate.value = true), 500)
     await nextTick()
     toBottom()
     settleUnread()
@@ -195,7 +193,6 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   ro?.disconnect()
-  clearTimeout(animTimer)
   clearTimeout(flashTimer)
   clearTimeout(unreadTimer)
 })
@@ -273,7 +270,7 @@ watch(() => chat.state.active, () => {
               <span class="h-px flex-1 bg-destructive/70" />
               <span class="rounded-sm bg-destructive px-1.5 py-px text-[10px] leading-4 font-bold text-white uppercase">New</span>
             </div>
-            <MessageItem :msg="r.m" :head="r.head" :animate="animate" :receipt="receipt?.id === r.m.id ? receipt : null" @jump="jump" />
+            <MessageItem :msg="r.m" :head="r.head" :animate="r.m.ts > openedAt" :receipt="receipt?.id === r.m.id ? receipt : null" @jump="jump" />
           </template>
         </div>
       </div>
