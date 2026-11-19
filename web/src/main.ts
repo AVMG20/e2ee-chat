@@ -20,6 +20,13 @@ window.addEventListener('vite:preloadError', (event) => {
 
 createApp(App).mount('#app')
 
+// Desktop app on Windows/Linux: a held Web Lock keeps the webview from being suspended while the
+// window is hidden in the tray, so messages, notifications and the unread badge keep coming.
+// (macOS: turned off in tauri.conf.json, backgroundThrottling.)
+if ('__TAURI_INTERNALS__' in globalThis) {
+  void navigator.locks?.request('e2ee-chat-keepalive', () => new Promise<void>(() => {})).catch(() => {})
+}
+
 // Installable web app (not in the desktop app, which ships its files itself).
 if (import.meta.env.PROD && 'serviceWorker' in navigator && !('__TAURI_INTERNALS__' in globalThis)) {
   window.addEventListener('load', () => {

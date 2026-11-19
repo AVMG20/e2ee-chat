@@ -6,6 +6,12 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+
+/// Window size, position and maximized state are remembered between starts (not visibility:
+/// the window is often hidden in the tray when the app quits).
+const WINDOW_STATE: StateFlags =
+    StateFlags::SIZE.union(StateFlags::POSITION).union(StateFlags::MAXIMIZED);
 
 /// True for the app's own pages (bundled UI, or the Vite dev server in debug builds).
 fn is_app_url(url: &Url) -> bool {
@@ -54,6 +60,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_window_state::Builder::new().with_state_flags(WINDOW_STATE).build())
         .plugin(nav_guard)
         .setup(|app| {
             // The window is built here (not from the config) so downloads get a handler: without
@@ -77,7 +84,10 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" => show_main(app),
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        let _ = app.save_window_state(WINDOW_STATE);
+                        app.exit(0)
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -101,6 +111,7 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
+                    let _ = window.app_handle().save_window_state(WINDOW_STATE);
                     // Many Linux desktops (e.g. GNOME) have no tray, so a hidden window couldn't be
                     // brought back there: minimize instead.
                     #[cfg(target_os = "linux")]

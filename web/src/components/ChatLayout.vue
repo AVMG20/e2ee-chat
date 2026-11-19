@@ -112,6 +112,10 @@ function onKey(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
     e.preventDefault()
     paletteOpen.value = !paletteOpen.value
+  } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ',') {
+    // Cmd+, (Ctrl+, elsewhere): settings, as in other apps.
+    e.preventDefault()
+    accountOpen.value = true
   }
 }
 
