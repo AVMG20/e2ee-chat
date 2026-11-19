@@ -9,6 +9,7 @@ import { isDark, toggleTheme } from '@/lib/theme'
 import { accountOpen, sidePanel, starredScope } from '@/lib/ui'
 
 function openStarred() {
+  accountOpen.value = false
   view.value = 'chats'
   starredScope.value = 'all'
   sidePanel.value = 'starred'
@@ -23,13 +24,13 @@ const unread = computed(() => chat.state.conversations.reduce((n, c) => (c.muted
       <img src="/favicon.svg" alt="E2EE Chat" class="mb-1 size-10 rounded-[0.9rem]">
       <div class="mb-1 h-px w-7 bg-line" />
 
-      <RailButton label="Chats" :active="view === 'chats'" @click="showChats">
+      <RailButton label="Chats" :active="!accountOpen && view === 'chats'" @click="accountOpen = false; showChats()">
         <MessageSquare class="size-5" :fill="view === 'chats' ? 'currentColor' : 'none'" />
         <template #badge>
           <span v-if="unread" class="absolute -right-1 -bottom-1 size-3 rounded-full bg-destructive ring-[3px] ring-[var(--rail)]" />
         </template>
       </RailButton>
-      <RailButton label="Friends" :active="view === 'friends'" @click="openFriends()">
+      <RailButton label="Friends" :active="!accountOpen && view === 'friends'" @click="accountOpen = false; openFriends()">
         <Users class="size-5" />
         <template #badge>
           <span v-if="incoming" class="unread absolute -right-1 -bottom-1 shadow-[0_0_0_3px_var(--rail)] !bg-destructive">{{ incoming }}</span>
@@ -44,7 +45,7 @@ const unread = computed(() => chat.state.conversations.reduce((n, c) => (c.muted
       <RailButton :label="isDark ? 'Light mode' : 'Dark mode'" @click="toggleTheme">
         <Sun v-if="isDark" class="size-5" /><Moon v-else class="size-5" />
       </RailButton>
-      <RailButton label="Account settings" @click="accountOpen = true"><Settings class="size-5" /></RailButton>
+      <RailButton label="Account settings" :active="accountOpen" @click="accountOpen = true"><Settings class="size-5" /></RailButton>
     </nav>
   </TooltipProvider>
 </template>

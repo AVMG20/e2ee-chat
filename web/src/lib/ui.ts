@@ -7,7 +7,11 @@ import type { Contact, Conversation, ConvId } from '@/lib/types'
 
 /** Legacy trigger: setting this to true opens the Friends view (ChatLayout resets it). */
 export const friendsOpen = ref(false)
+/** Settings page (full-screen view). */
 export const accountOpen = ref(false)
+export type SettingsSection = 'account' | 'privacy' | 'notifications' | 'appearance' | 'app'
+/** Last opened settings section, kept while the app runs. */
+export const settingsSection = ref<SettingsSection>('account')
 export const paletteOpen = ref(false)
 /** Right-hand panel of the conversation view; stays open when switching chats. */
 export type SidePanel = 'info' | 'search' | 'media' | 'starred'

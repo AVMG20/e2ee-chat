@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import AccountDialog from '@/components/AccountDialog.vue'
+import SettingsPage from '@/components/settings/SettingsPage.vue'
 import AddMembersDialog from '@/components/AddMembersDialog.vue'
 import ChangePasswordDialog from '@/components/ChangePasswordDialog.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -51,7 +51,7 @@ onBeforeUnmount(() => {
   wide.removeEventListener('change', onWide)
   chat.setConvVisible(false)
 })
-watch([view, showConv, isWide], () => chat.setConvVisible(view.value === 'chats' && (showConv.value || isWide.value)), { immediate: true })
+watch([view, showConv, isWide, accountOpen], () => chat.setConvVisible(!accountOpen.value && view.value === 'chats' && (showConv.value || isWide.value)), { immediate: true })
 // Anything that opens a conversation brings the chat view back.
 watch(() => chat.state.active, (a) => {
   if (a) view.value = 'chats'
@@ -165,11 +165,11 @@ onBeforeUnmount(() => {
 <template>
   <div class="flex h-full w-full">
     <Rail />
-    <Sidebar class="w-full md:flex md:w-64 md:shrink-0" :class="showConv ? 'hidden' : 'flex'" />
-    <FriendsView v-if="view === 'friends'" class="min-w-0 flex-1 md:flex" :class="showConv ? 'flex' : 'hidden'" />
-    <ConversationPane v-else class="min-w-0 flex-1 md:flex" :class="showConv ? 'flex' : 'hidden'" @back="showChats" />
+    <SettingsPage v-if="accountOpen" class="min-w-0 flex-1" @change-password="pwOpen = true" @sign-out="signOutOpen = true" />
+    <Sidebar class="w-full md:w-64 md:shrink-0" :class="accountOpen ? 'hidden' : showConv ? 'hidden md:flex' : 'flex'" />
+    <FriendsView v-if="view === 'friends'" class="min-w-0 flex-1" :class="accountOpen ? 'hidden' : showConv ? 'flex' : 'hidden md:flex'" />
+    <ConversationPane v-else class="min-w-0 flex-1" :class="accountOpen ? 'hidden' : showConv ? 'flex' : 'hidden md:flex'" @back="showChats" />
 
-    <AccountDialog v-model:open="accountOpen" @change-password="pwOpen = true" @sign-out="signOutOpen = true" />
     <ChangePasswordDialog v-model:open="pwOpen" />
     <CommandPalette v-model:open="paletteOpen" />
     <AddMembersDialog v-if="membersGroup" v-model:open="membersOpen" :group="membersGroup" />

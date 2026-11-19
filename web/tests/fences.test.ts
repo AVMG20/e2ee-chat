@@ -47,3 +47,18 @@ describe('docToPlainText', () => {
     expect(docToPlainText(doc)).toBe('line one\nline two\n- a\nx  =  1\n  y')
   })
 })
+
+describe('message times', () => {
+  test('relative for an hour, then clock, yesterday, weekday, date', async () => {
+    const { ago, now, setTimeFormat } = await import('../src/lib/format')
+    setTimeFormat('24')
+    const base = new Date(2026, 10, 19, 15, 0).getTime() // Thu 19 Nov 2026 15:00
+    now.value = base
+    expect(ago(base - 20_000)).toBe('just now')
+    expect(ago(base - 5 * 60_000)).toBe('5 min ago')
+    expect(ago(new Date(2026, 10, 19, 9, 7).getTime())).toBe('09:07')
+    expect(ago(new Date(2026, 10, 18, 14, 49).getTime())).toBe('Yesterday at 14:49')
+    expect(ago(new Date(2026, 10, 16, 8, 0).getTime())).toMatch(/^Monday at 08:00$/)
+    expect(ago(new Date(2026, 10, 10, 8, 0).getTime())).toMatch(/10 Nov.* 08:00|Nov 10.* 08:00/)
+  })
+})
