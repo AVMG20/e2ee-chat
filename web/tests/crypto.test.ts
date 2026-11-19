@@ -114,3 +114,24 @@ describe('password-locked keys', () => {
     expect(() => openVault(bob, sealed)).toThrow()
   })
 })
+
+describe('backups and notices', () => {
+  test('backup records only open with the same key, position and backup', async () => {
+    const { backupKey, sealRecord, openRecord } = await import('../src/lib/crypto')
+    const key = backupKey(alice, 'ctx')
+    const sealed = sealRecord(key, utf8('hello'), utf8('a\n0'))
+    expect(new TextDecoder().decode(openRecord(key, sealed, utf8('a\n0')))).toBe('hello')
+    expect(() => openRecord(key, sealed, utf8('a\n1'))).toThrow()
+    expect(() => openRecord(backupKey(bob, 'ctx'), sealed, utf8('a\n0'))).toThrow()
+  })
+
+  test('notices verify only for the signer and the exact text', async () => {
+    const { signNotice, verifyNotice } = await import('../src/lib/crypto')
+    const sig = signNotice(alice, 'revoke A device1')
+    expect(verifyNotice(alice.signPk, 'revoke A device1', sig)).toBe(true)
+    expect(verifyNotice(alice.signPk, 'revoke A device2', sig)).toBe(false)
+    expect(verifyNotice(bob.signPk, 'revoke A device1', sig)).toBe(false)
+    expect(verifyNotice(alice.signPk, 'revoke A device1', 'not base64!')).toBe(false)
+    expect(verifyNotice(alice.signPk, 'revoke A device1', undefined)).toBe(false)
+  })
+})

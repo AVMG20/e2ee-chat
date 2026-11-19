@@ -225,9 +225,13 @@ async fn multi_device_sync() {
     assert_eq!(recv_type(&mut phone, "deliver").await["envelope"]["id"], "m3");
     assert_eq!(recv_type(&mut laptop, "deliver").await["envelope"]["id"], "m3");
 
-    // Unknown recipients are refused.
+    // Unknown recipients are refused...
     send(&mut a.ws, json!({"type": "send", "envelope": envelope("m4", &a.id, &["ZZZZZZZZ"])})).await;
     assert_eq!(recv_type(&mut a.ws, "failed").await["message"], "Unknown recipient");
+    // ...but skipped next to known ones (a group with a deleted member keeps working).
+    send(&mut a.ws, json!({"type": "send", "envelope": envelope("m5", &a.id, &[&bob_id, "ZZZZZZZZ"])})).await;
+    assert_eq!(recv_type(&mut a.ws, "sent").await["id"], "m5");
+    assert_eq!(recv_type(&mut phone, "deliver").await["envelope"]["id"], "m5");
 }
 
 #[tokio::test]
@@ -391,4 +395,100 @@ async fn blocking_stops_requests_and_messages() {
     assert_eq!(recv_type(&mut a.ws, "ok").await["req"], 8);
     send(&mut a.ws, json!({"type": "friend_request", "req": 9, "id": b.id})).await;
     assert_eq!(recv_type(&mut a.ws, "ok").await["req"], 9);
+}
+
+#[tokio::test]
+async fn devices_can_be_listed_and_signed_out() {
+    let (url, _dir) = start().await;
+    let mut a = register(&url, "alice", 1).await.unwrap();
+    let (mut laptop, _) = connect_async(&url).await.unwrap();
+    send(&mut laptop, json!({"type": "login", "username": "alice", "authKey": b64(1, 32), "device": "Firefox · Linux\u{202e}"})).await;
+    let w = recv(&mut laptop).await;
+    let laptop_token = w["token"].as_str().unwrap().to_string();
+
+    send(&mut a.ws, json!({"type": "sessions", "req": 1})).await;
+    let list = recv_type(&mut a.ws, "sessions").await;
+    assert_eq!(list["req"], 1);
+    let sessions = list["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2);
+    let me = sessions.iter().find(|s| s["current"] == true).unwrap();
+    let other = sessions.iter().find(|s| s["current"] == false).unwrap();
+    assert_eq!(other["name"], "Firefox · Linux");
+    assert_eq!(other["online"], true);
+
+    // Can't revoke the current device this way.
+    send(&mut a.ws, json!({"type": "revoke_session", "req": 2, "id": me["id"]})).await;
+    assert_eq!(recv_type(&mut a.ws, "error").await["req"], 2);
+
+    send(&mut a.ws, json!({"type": "revoke_session", "req": 3, "id": other["id"], "proof": "signed"})).await;
+    assert_eq!(recv_type(&mut a.ws, "ok").await["req"], 3);
+    let kicked = recv_type(&mut laptop, "error").await;
+    assert_eq!((kicked["code"].as_str(), kicked["proof"].as_str()), (Some("revoked"), Some("signed")));
+
+    // Every later resume says so too, with the proof.
+    for _ in 0..2 {
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+        send(&mut ws, json!({"type": "resume", "token": laptop_token})).await;
+        let r = recv(&mut ws).await;
+        assert_eq!((r["code"].as_str(), r["proof"].as_str()), (Some("revoked"), Some("signed")));
+    }
+
+    send(&mut a.ws, json!({"type": "sessions", "req": 4})).await;
+    assert_eq!(recv_type(&mut a.ws, "sessions").await["sessions"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn account_deletion_removes_everything() {
+    let (url, _dir) = start().await;
+    let mut a = register(&url, "alice", 1).await.unwrap();
+    let mut b = register(&url, "bob", 2).await.unwrap();
+    befriend(&mut a, &mut b).await;
+    let mut a2 = resume(&url, &a.token, 0).await;
+
+    send(&mut a.ws, json!({"type": "delete_account", "req": 1, "authKey": b64(9, 32)})).await;
+    assert_eq!(recv_type(&mut a.ws, "error").await["message"], "Password is wrong");
+    send(&mut a.ws, json!({"type": "delete_account", "req": 2, "authKey": b64(1, 32)})).await;
+    assert_eq!(recv_type(&mut a.ws, "ok").await["req"], 2);
+    assert_eq!(recv_type(&mut a2, "error").await["code"], "deleted");
+
+    // Bob's friends list no longer has alice.
+    loop {
+        let snap = recv_type(&mut b.ws, "friends").await;
+        if snap["friends"].as_array().unwrap().is_empty() {
+            break;
+        }
+    }
+    send(&mut b.ws, json!({"type": "lookup", "req": 5, "ids": [a.id]})).await;
+    assert!(recv_type(&mut b.ws, "users").await["users"].as_array().unwrap().is_empty());
+
+    // The old password no longer works, and nobody can take the name to pose as alice.
+    let (mut ws, _) = connect_async(&url).await.unwrap();
+    send(&mut ws, json!({"type": "login", "username": "alice", "authKey": b64(1, 32)})).await;
+    assert_eq!(recv(&mut ws).await["type"], "error");
+    assert_eq!(register(&url, "Alice", 3).await.err().as_deref(), Some("That username is taken"));
+}
+
+#[tokio::test]
+async fn sessions_from_older_versions_are_migrated() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chat.db");
+    {
+        let state = AppState::open(&path, Config::default()).unwrap();
+        drop(state);
+        // Turn the sessions table back into the 0.2 shape.
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch(
+            "DROP TABLE sessions;
+             CREATE TABLE sessions (token_hash BLOB PRIMARY KEY, user_id TEXT NOT NULL,
+                 created_at INTEGER NOT NULL DEFAULT (unixepoch()), last_used INTEGER NOT NULL DEFAULT (unixepoch()));
+             INSERT INTO sessions(token_hash, user_id) VALUES (x'00', 'ABCDEFGH');",
+        )
+        .unwrap();
+    }
+    AppState::open(&path, Config::default()).unwrap();
+    AppState::open(&path, Config::default()).unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let (sid, revoked): (String, i64) =
+        db.query_row("SELECT sid, revoked FROM sessions", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!((sid.len(), revoked), (18, 0));
 }

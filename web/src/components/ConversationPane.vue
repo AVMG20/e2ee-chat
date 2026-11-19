@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import {
-  ArrowLeft, Copy, Ellipsis, Hash, Loader2, LogOut, MessageCircle, Pencil, Search, ShieldAlert, ShieldCheck, Upload, UserMinus, UserPlus, Users,
+  ArrowLeft, AtSign, Bell, BellOff, Check, Copy, Ellipsis, Hash, Images, Loader2, LogOut, MessageCircle, Pencil, Search, Star, ShieldAlert, ShieldCheck, Upload, UserMinus, UserPlus, Users,
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import {
@@ -11,14 +11,16 @@ import AddMembersDialog from '@/components/AddMembersDialog.vue'
 import Composer from '@/components/Composer.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub,
+  DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import MediaDialog from '@/components/MediaDialog.vue'
 import MessageList from '@/components/MessageList.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { renameGroupId, pendingAction } from '@/lib/nav'
-import { copyText, friendsOpen, paletteOpen } from '@/lib/ui'
+import { MUTE_OPTIONS, copyText, friendsOpen, mediaOpen, muteFor, paletteOpen, paletteScope, setPrefs, starredOpen } from '@/lib/ui'
 
 defineEmits<{ back: [] }>()
 
@@ -147,18 +149,33 @@ async function leave() {
           <button v-else-if="group" class="truncate text-xs text-muted-foreground hover:text-foreground hover:underline" @click="membersOpen = true">{{ group.members.length }} members</button>
         </div>
 
-        <button class="btn btn-ghost btn-icon btn-sm" title="Search messages" aria-label="Search messages" @click="paletteOpen = true"><Search /></button>
+        <button class="btn btn-ghost btn-icon btn-sm" title="Search messages" aria-label="Search messages" @click="paletteScope = conv.id; paletteOpen = true"><Search /></button>
 
-        <DropdownMenu v-if="group">
+        <DropdownMenu>
           <DropdownMenuTrigger as-child>
-            <button class="btn btn-ghost btn-icon btn-sm" title="Group options" aria-label="Group options"><Ellipsis /></button>
+            <button class="btn btn-ghost btn-icon btn-sm" :title="group ? 'Group options' : 'Chat options'" :aria-label="group ? 'Group options' : 'Chat options'"><Ellipsis /></button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" class="w-48">
-            <DropdownMenuItem @select="membersOpen = true"><Users />Members</DropdownMenuItem>
-            <DropdownMenuItem @select="addOpen = true"><UserPlus />Add members</DropdownMenuItem>
-            <DropdownMenuItem v-if="isAdmin" @select="renameGroupId = group.id"><Pencil />Rename group</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" @select="leaveOpen = true"><LogOut />Leave group</DropdownMenuItem>
+          <DropdownMenuContent align="end" class="w-56">
+            <template v-if="group">
+              <DropdownMenuItem @select="membersOpen = true"><Users />Members</DropdownMenuItem>
+              <DropdownMenuItem @select="addOpen = true"><UserPlus />Add members</DropdownMenuItem>
+              <DropdownMenuItem v-if="isAdmin" @select="renameGroupId = group.id"><Pencil />Rename group</DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </template>
+            <DropdownMenuItem @select="mediaOpen = true"><Images />Media and files</DropdownMenuItem>
+            <DropdownMenuItem @select="starredOpen = true"><Star />Starred messages</DropdownMenuItem>
+            <DropdownMenuItem v-if="conv.muted" @select="setPrefs(conv.id, { muted: false })"><Bell />Unmute</DropdownMenuItem>
+            <DropdownMenuSub v-else>
+              <DropdownMenuSubTrigger><BellOff />Mute</DropdownMenuSubTrigger>
+              <DropdownMenuSubContent class="w-56">
+                <DropdownMenuItem v-for="o in MUTE_OPTIONS" :key="o.ms" @select="muteFor(conv.id, o.ms)">{{ o.label }}</DropdownMenuItem>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuItem v-if="group" @select="setPrefs(conv.id, { mentionsOnly: !conv.mentionsOnly })"><AtSign />Only notify for mentions<Check v-if="conv.mentionsOnly" class="ml-auto" /></DropdownMenuItem>
+            <template v-if="group">
+              <DropdownMenuSeparator />
+              <DropdownMenuItem variant="destructive" @select="leaveOpen = true"><LogOut />Leave group</DropdownMenuItem>
+            </template>
           </DropdownMenuContent>
         </DropdownMenu>
       </header>
@@ -184,6 +201,7 @@ async function leave() {
       </div>
 
       <MessageList />
+      <MediaDialog />
 
       <div class="shrink-0 px-3 pb-1 sm:px-4 sm:pb-2"><Composer ref="composer" :disabled="!!contact?.keyChanged" /></div>
 

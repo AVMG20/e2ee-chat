@@ -2,12 +2,12 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, Download, ImageOff, X } from 'lucide-vue-next'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
-import { viewerId } from '@/components/messages/state'
+import { viewerId, viewerList } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
 import { formatSize } from '@/lib/format'
 
 /** Full-screen lightbox over the images currently loaded in the conversation. */
-const images = computed(() => chat.state.messages.filter((m) => m.kind === 'file' && m.file?.mime.startsWith('image/')))
+const images = computed(() => (viewerList.value ?? chat.state.messages).filter((m) => m.kind === 'file' && m.file?.mime.startsWith('image/')))
 const idx = computed(() => images.value.findIndex((m) => m.id === viewerId.value))
 const cur = computed(() => images.value[idx.value] ?? null)
 const open = computed({

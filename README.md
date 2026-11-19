@@ -7,8 +7,12 @@ A self-hosted, end-to-end encrypted chat app for you and your friends. Use it in
 - Rich text, code blocks with syntax highlighting, replies, reactions, edit and delete
 - Read receipts (optional), typing indicators, profile pictures
 - Encrypted files and images (up to 10 MB)
-- Search, pinned, muted and archived chats
-- History on all your devices
+- Search (all chats or one), pinned, archived and muted chats (for a while, or mentions only)
+- Forward and star messages, a media gallery per chat
+- Messages written offline are sent when you're back online
+- History on all your devices, and encrypted backups you can import again
+- See and sign out your devices, or delete your account
+- Installable as an app on phones (PWA); the desktop app updates itself
 - One Rust binary with SQLite, nothing else to run
 
 ## Security

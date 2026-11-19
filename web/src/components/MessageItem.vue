@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { Clock, CornerUpLeft, Copy, Pencil, SmilePlus, Trash2, TriangleAlert } from 'lucide-vue-next'
+import { Clock, CornerUpLeft, Copy, Forward, Pencil, RotateCw, SmilePlus, Star, Trash2, TriangleAlert } from 'lucide-vue-next'
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub,
   ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger,
@@ -12,7 +12,7 @@ import MessageEditor from '@/components/messages/MessageEditor.vue'
 import ReactionBar from '@/components/messages/ReactionBar.vue'
 import { QUICK_EMOJI } from '@/components/messages/emoji'
 import { useLongPress } from '@/components/messages/longpress'
-import { canDeleteMsg, canEditMsg, deleteMsg, deleteTarget, editingId, flashId, myId, reactTo, replyTo } from '@/components/messages/state'
+import { canDeleteMsg, canEditMsg, canForward, deleteMsg, deleteTarget, editingId, flashId, forwardMsg, myId, reactTo, replyTo, retry, toggleStar } from '@/components/messages/state'
 import { chat } from '@/lib/chat'
 import { formatClock, hueOf } from '@/lib/format'
 import { docToText, renderMessageHtml } from '@/lib/render'
@@ -37,6 +37,7 @@ const replyName = computed(() => (props.msg.reply ? chat.displayName(props.msg.r
 const time = computed(() => formatClock(props.msg.ts))
 const failed = computed(() => props.msg.status === 'failed')
 const settled = computed(() => props.msg.status !== 'failed' && props.msg.status !== 'sending')
+const starred = computed(() => chat.isStarred(props.msg))
 const editing = computed(() => editingId.value === props.msg.id)
 const canEdit = computed(() => canEditMsg(props.msg))
 const canDelete = computed(() => canDeleteMsg(props.msg))
@@ -93,7 +94,7 @@ function onBodyClick(e: MouseEvent) {
   setTimeout(() => (btn.innerHTML = ICON_COPY), 1500)
 }
 
-const press = useLongPress(() => props.msg, () => settled.value && !editing.value)
+const press = useLongPress(() => props.msg, () => (settled.value || failed.value) && !editing.value)
 
 function askDelete(e?: MouseEvent) {
   if (e?.shiftKey) void deleteMsg(props.msg)
@@ -142,17 +143,21 @@ function askDelete(e?: MouseEvent) {
               <span class="hue-text text-[15px] font-semibold" :style="{ '--h': hueOf(msg.from) }">{{ name }}</span>
               <span class="text-[11px] text-muted-foreground">{{ time }}</span>
               <Clock v-if="msg.status === 'sending'" class="size-3 text-muted-foreground" aria-label="Sending" />
+              <Star v-if="starred" class="size-3 self-center fill-current text-amber-500" aria-label="Starred" title="Starred" />
             </div>
+            <div v-if="msg.forwarded" class="flex items-center gap-1 text-xs text-muted-foreground"><Forward class="size-3" />Forwarded</div>
             <MessageEditor v-if="editing" :msg="msg" />
             <div
               v-else-if="msg.kind === 'text'" ref="body" class="prose-like text-[15px] text-foreground/90 [&_pre]:relative [&_pre]:rounded-md [&_pre]:border [&_pre]:border-line [&_pre]:bg-inset [&_pre]:px-3 [&_pre]:py-2 [&_pre]:font-mono [&_pre]:text-[13px] [&_pre]:leading-[1.45] [&_pre_code]:leading-[1.45] [&_pre[data-lang]]:before:mb-1 [&_pre[data-lang]]:before:block [&_pre[data-lang]]:before:text-[10px] [&_pre[data-lang]]:before:font-semibold [&_pre[data-lang]]:before:tracking-wide [&_pre[data-lang]]:before:text-muted-foreground [&_pre[data-lang]]:before:uppercase [&_pre[data-lang]]:before:content-[attr(data-lang)] [&_pre_code]:bg-transparent"
               @click="onBodyClick" v-html="html"
             />
             <FileMessage v-else-if="msg.kind === 'file' && msg.file" :msg="msg" />
-            <div v-if="failed" class="mt-0.5 flex items-center gap-1 text-xs font-medium text-destructive opacity-100">
+            <div v-if="failed" class="mt-0.5 flex items-center gap-2 text-xs font-medium text-destructive opacity-100">
               <TriangleAlert class="size-3.5" />Not sent
+              <button type="button" class="btn btn-soft btn-sm !h-6 !px-2" @click="retry(msg)"><RotateCw class="!size-3" />Retry</button>
             </div>
             <Clock v-if="msg.status === 'sending' && !head" class="mt-0.5 size-3 text-muted-foreground" aria-label="Sending" />
+            <Star v-if="starred && !head" class="mt-0.5 size-3 fill-current text-amber-500" aria-label="Starred" title="Starred" />
             <ReactionBar :msg="msg" />
             <div v-if="receipt && !failed" class="mt-0.5 text-right text-xs text-muted-foreground" :title="receipt.title">{{ receipt.text }}</div>
           </div>
@@ -168,6 +173,8 @@ function askDelete(e?: MouseEvent) {
             <button type="button" class="btn btn-ghost btn-icon btn-sm" title="Add reaction" aria-label="Add reaction"><SmilePlus /></button>
           </EmojiPicker>
           <button type="button" class="btn btn-ghost btn-icon btn-sm" title="Reply" aria-label="Reply" @click="replyTo = msg"><CornerUpLeft /></button>
+          <button type="button" class="btn btn-ghost btn-icon btn-sm" :title="starred ? 'Unstar' : 'Star'" :aria-label="starred ? 'Unstar' : 'Star'" @click="toggleStar(msg)"><Star :class="starred && 'fill-current text-amber-500'" /></button>
+          <button v-if="canForward(msg)" type="button" class="btn btn-ghost btn-icon btn-sm" title="Forward" aria-label="Forward" @click="forwardMsg = msg"><Forward /></button>
           <button v-if="canEdit" type="button" class="btn btn-ghost btn-icon btn-sm" title="Edit" aria-label="Edit" @click="editingId = msg.id"><Pencil /></button>
           <button
             v-if="canDelete" type="button" class="btn btn-ghost btn-icon btn-sm hover:!text-destructive"
@@ -179,7 +186,13 @@ function askDelete(e?: MouseEvent) {
       </div>
     </ContextMenuTrigger>
 
-    <ContextMenuContent v-if="settled" class="w-48">
+    <ContextMenuContent v-if="failed" class="w-48">
+      <ContextMenuItem @select="retry(msg)"><RotateCw />Retry</ContextMenuItem>
+      <ContextMenuItem v-if="text" @select="copyText(text, 'Copied')"><Copy />Copy text</ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem variant="destructive" @select="askDelete()"><Trash2 />Delete message</ContextMenuItem>
+    </ContextMenuContent>
+    <ContextMenuContent v-else-if="settled" class="w-48">
       <ContextMenuSub>
         <ContextMenuSubTrigger><SmilePlus />Add reaction</ContextMenuSubTrigger>
         <ContextMenuSubContent class="w-auto">
@@ -189,6 +202,8 @@ function askDelete(e?: MouseEvent) {
         </ContextMenuSubContent>
       </ContextMenuSub>
       <ContextMenuItem @select="replyTo = msg"><CornerUpLeft />Reply</ContextMenuItem>
+      <ContextMenuItem v-if="canForward(msg)" @select="forwardMsg = msg"><Forward />Forward</ContextMenuItem>
+      <ContextMenuItem @select="toggleStar(msg)"><Star :class="starred && 'fill-current'" />{{ starred ? 'Unstar' : 'Star' }}</ContextMenuItem>
       <ContextMenuItem v-if="text" @select="copyText(text, 'Copied')"><Copy />Copy text</ContextMenuItem>
       <template v-if="canEdit || canDelete">
         <ContextMenuSeparator />

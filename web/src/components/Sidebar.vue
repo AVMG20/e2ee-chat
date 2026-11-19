@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Archive, BellOff, Check, ChevronRight, ChevronDown, Copy, Hash, Loader2, Moon, Pin, Plus, Search, Settings, Sun, TriangleAlert, UserPlus, Users } from 'lucide-vue-next'
+import { Archive, AtSign, BellOff, Check, ChevronRight, ChevronDown, Copy, Hash, Loader2, Moon, Pin, Plus, Search, Sun, TriangleAlert, UserPlus, Users } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import NewGroupDialog from '@/components/NewGroupDialog.vue'
 import EntryMenu from '@/components/shell/EntryMenu.vue'
@@ -11,7 +11,7 @@ import { errMsg, relTime } from '@/lib/format'
 import { openConversation, openFriends, showConv } from '@/lib/nav'
 import { docToText } from '@/lib/render'
 import { isDark, toggleTheme } from '@/lib/theme'
-import { accountOpen, paletteOpen, useCopy } from '@/lib/ui'
+import { accountOpen, muteTitle, paletteOpen, paletteScope, useCopy } from '@/lib/ui'
 import type { Conversation } from '@/lib/types'
 
 const groupOpen = ref(false)
@@ -48,7 +48,7 @@ async function select(c: Conversation) {
     <div class="flex h-12 shrink-0 items-center gap-1.5 border-b border-sidebar-border px-2.5">
       <button
         class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md bg-inset px-2.5 text-left text-sm text-muted-foreground outline-none transition-shadow hover:text-foreground focus-visible:shadow-[var(--glow)]"
-        aria-label="Search conversations" @click="paletteOpen = true"
+        aria-label="Search conversations" @click="paletteScope = null; paletteOpen = true"
       >
         <Search class="size-4 shrink-0" />
         <span class="flex-1 truncate">Search</span>
@@ -104,7 +104,8 @@ async function select(c: Conversation) {
                   <span class="mt-0.5 flex items-center gap-1.5">
                     <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground"><template v-if="draftOf(c)"><span class="font-semibold text-destructive">Draft:</span> {{ draftOf(c) }}</template><template v-else>{{ c.preview }}</template></span>
                     <Pin v-if="c.pinned" class="size-3 shrink-0 text-muted-foreground" aria-label="Pinned" />
-                    <BellOff v-if="c.muted" class="size-3 shrink-0 text-muted-foreground" aria-label="Muted" />
+                    <BellOff v-if="c.muted" class="size-3 shrink-0 text-muted-foreground" :aria-label="muteTitle(c)" :title="muteTitle(c)" />
+                    <AtSign v-else-if="c.mentionsOnly" class="size-3 shrink-0 text-muted-foreground" :aria-label="muteTitle(c)" :title="muteTitle(c)" />
                     <span v-if="c.unread > 0" class="unread shrink-0" :class="c.muted && '!bg-zinc-500'">{{ c.unread > 99 ? '99+' : c.unread }}</span>
                   </span>
                 </span>
@@ -137,7 +138,8 @@ async function select(c: Conversation) {
                   <span class="mt-0.5 flex items-center gap-1.5">
                     <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground"><template v-if="draftOf(c)"><span class="font-semibold text-destructive">Draft:</span> {{ draftOf(c) }}</template><template v-else>{{ c.preview }}</template></span>
                     <Pin v-if="c.pinned" class="size-3 shrink-0 text-muted-foreground" aria-label="Pinned" />
-                    <BellOff v-if="c.muted" class="size-3 shrink-0 text-muted-foreground" aria-label="Muted" />
+                    <BellOff v-if="c.muted" class="size-3 shrink-0 text-muted-foreground" :aria-label="muteTitle(c)" :title="muteTitle(c)" />
+                    <AtSign v-else-if="c.mentionsOnly" class="size-3 shrink-0 text-muted-foreground" :aria-label="muteTitle(c)" :title="muteTitle(c)" />
                     <span v-if="c.unread > 0" class="unread shrink-0" :class="c.muted && '!bg-zinc-500'">{{ c.unread > 99 ? '99+' : c.unread }}</span>
                   </span>
                 </span>
@@ -177,16 +179,16 @@ async function select(c: Conversation) {
 
     <!-- user panel -->
     <div class="flex h-[3.25rem] shrink-0 items-center gap-2 bg-rail/60 px-2" style="--dot-ring: color-mix(in srgb, var(--rail) 60%, var(--sidebar))">
-      <button class="flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 text-left outline-none transition-colors hover:bg-hover focus-visible:shadow-[var(--glow)]" title="Copy your ID" @click="copy(myId)">
+      <button class="flex min-w-0 flex-1 items-center gap-2 rounded-md p-1 text-left outline-none transition-colors hover:bg-hover focus-visible:shadow-[var(--glow)]" title="Account settings" aria-label="Account settings" @click="accountOpen = true">
         <UserAvatar :name="chat.state.account?.username ?? '?'" :id="chat.state.account?.id" :src="chat.state.account?.avatar" :size="32" :online="chat.state.status === 'online'" />
         <span class="min-w-0 flex-1 leading-tight">
           <span class="block truncate text-[13px] font-semibold">{{ chat.state.account?.username }}</span>
           <span class="block truncate font-mono text-[11px] text-muted-foreground">{{ copied ? 'ID copied' : myId }}</span>
         </span>
-        <Check v-if="copied" class="size-4 shrink-0 text-success" /><Copy v-else class="size-3.5 shrink-0 text-muted-foreground" />
       </button>
-      <button class="btn btn-ghost btn-icon btn-sm md:hidden" title="Account settings" aria-label="Account settings" @click="accountOpen = true"><Settings /></button>
-    </div>
+      <button class="btn btn-ghost btn-icon btn-sm shrink-0" title="Copy your ID" aria-label="Copy your ID" @click="copy(myId)">
+        <Check v-if="copied" class="text-success" /><Copy v-else />
+      </button>    </div>
 
     <NewGroupDialog v-model:open="groupOpen" @created="showConv = true" />
   </aside>

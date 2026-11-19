@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Camera, Download, KeyRound, Loader2, LogOut, Trash2 } from 'lucide-vue-next'
+import { Camera, Download, KeyRound, Laptop, Loader2, LogOut, Trash2, Upload } from 'lucide-vue-next'
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import CopyIdButton from '@/components/shell/CopyIdButton.vue'
 import Toggle from '@/components/shell/Toggle.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
+import AvatarCropDialog from '@/components/AvatarCropDialog.vue'
+import DevicesDialog from '@/components/DevicesDialog.vue'
+import DeleteAccountDialog from '@/components/DeleteAccountDialog.vue'
 import { chat } from '@/lib/chat'
 import { notifyDenied, notifyEnabled, notifySupported, setNotify, setSound, soundEnabled } from '@/lib/notify'
 import { toast } from 'vue-sonner'
@@ -21,10 +24,17 @@ const id = computed(() => chat.formatId(rawId.value))
 const picker = ref<HTMLInputElement | null>(null)
 const avatarBusy = ref(false)
 
-async function setAvatar(file: File | null) {
+const cropOpen = ref(false)
+const cropFile = ref<File | null>(null)
+const devicesOpen = ref(false)
+const deleteOpen = ref(false)
+const backupBusy = ref<'' | 'export' | 'import'>('')
+const backupPicker = ref<HTMLInputElement | null>(null)
+
+async function removeAvatar() {
   avatarBusy.value = true
   try {
-    await chat.setAvatar(file)
+    await chat.setAvatar(null)
   } catch (e) {
     toast.error(errMsg(e))
   } finally {
@@ -36,7 +46,46 @@ function onPick(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
   input.value = ''
-  if (file) void setAvatar(file)
+  if (file) {
+    cropFile.value = file
+    cropOpen.value = true
+  }
+}
+
+async function exportBackup() {
+  backupBusy.value = 'export'
+  try {
+    const { blob, name } = await chat.exportBackup()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  } catch (e) {
+    toast.error(errMsg(e))
+  } finally {
+    backupBusy.value = ''
+  }
+}
+
+async function importBackup(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  backupBusy.value = 'import'
+  try {
+    const r = await chat.importBackup(file)
+    if (r.messages || r.files || r.conversations) toast.success(`Restored ${r.messages} messages in ${r.conversations} chats (${r.files} files)`)
+    else toast('Nothing new in this backup')
+  } catch (err) {
+    toast.error(errMsg(err))
+  } finally {
+    backupBusy.value = ''
+  }
 }
 
 async function setReceipts(on: boolean) {
@@ -80,7 +129,7 @@ async function toggleNotify(on: boolean) {
           <div class="font-mono text-sm tracking-[0.1em] text-muted-foreground select-all">{{ id }}</div>
           <div class="mt-1 flex gap-3 text-xs">
             <button class="text-[var(--link)] hover:underline disabled:opacity-50" :disabled="avatarBusy" @click="picker?.click()">Change picture</button>
-            <button v-if="chat.state.account?.avatar" class="inline-flex items-center gap-1 text-muted-foreground hover:text-destructive hover:underline disabled:opacity-50" :disabled="avatarBusy" @click="setAvatar(null)"><Trash2 class="size-3" />Remove</button>
+            <button v-if="chat.state.account?.avatar" class="inline-flex items-center gap-1 text-muted-foreground hover:text-destructive hover:underline disabled:opacity-50" :disabled="avatarBusy" @click="removeAvatar"><Trash2 class="size-3" />Remove</button>
           </div>
         </div>
         <CopyIdButton :id="rawId" label="Copy ID" />
@@ -105,12 +154,41 @@ async function toggleNotify(on: boolean) {
         />
       </div>
 
+      <div class="space-y-3.5">
+        <div class="eyebrow">Devices</div>
+        <p class="text-xs text-muted-foreground">See where you are signed in and sign out devices you no longer use.</p>
+        <button class="btn btn-soft w-full" @click="devicesOpen = true"><Laptop />Manage devices</button>
+      </div>
+
+      <div class="space-y-3.5">
+        <div class="eyebrow">Backup</div>
+        <p class="text-xs text-muted-foreground">The backup holds all chats and files on this device. It is encrypted and only your account can open it.</p>
+        <div class="grid gap-2 sm:grid-cols-2">
+          <button class="btn btn-soft" :disabled="!!backupBusy" @click="exportBackup">
+            <Loader2 v-if="backupBusy === 'export'" class="animate-spin" /><Download v-else />{{ backupBusy === 'export' ? 'Exporting…' : 'Export backup' }}
+          </button>
+          <button class="btn btn-soft" :disabled="!!backupBusy" @click="backupPicker?.click()">
+            <Loader2 v-if="backupBusy === 'import'" class="animate-spin" /><Upload v-else />{{ backupBusy === 'import' ? 'Importing…' : 'Import backup' }}
+          </button>
+        </div>
+        <input ref="backupPicker" type="file" class="hidden" @change="importBackup">
+      </div>
+
       <a v-if="!chat.isDesktop" :href="chat.desktopDownloadUrl" target="_blank" rel="noopener noreferrer" class="btn btn-ghost -my-2 justify-start"><Download />Download desktop app</a>
 
       <div class="grid gap-2 sm:grid-cols-2">
         <button class="btn btn-soft" @click="open = false; $emit('changePassword')"><KeyRound />Change password</button>
         <button class="btn btn-danger" @click="open = false; $emit('signOut')"><LogOut />Sign out</button>
       </div>
+
+      <div class="space-y-2 border-t border-destructive/20 pt-4">
+        <div class="eyebrow text-destructive">Danger zone</div>
+        <button class="btn btn-danger btn-sm" aria-label="Delete account" title="Delete account" @click="deleteOpen = true"><Trash2 />Delete account</button>
+      </div>
     </DialogContent>
   </Dialog>
+
+  <AvatarCropDialog v-model:open="cropOpen" :file="cropFile" />
+  <DevicesDialog v-model:open="devicesOpen" />
+  <DeleteAccountDialog v-model:open="deleteOpen" @deleted="open = false" />
 </template>

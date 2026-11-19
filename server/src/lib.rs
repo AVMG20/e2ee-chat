@@ -70,6 +70,17 @@ const SIGNAL_INTERVAL: Duration = Duration::from_millis(500);
 const SESSION_IDLE_DAYS: i64 = 180;
 /// User IDs: 8 chars of Crockford base32 (no I, L, O, U).
 const ID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/// Max length of a device name ("Firefox on Linux").
+const MAX_DEVICE_NAME: usize = 64;
+/// Max length of a device's own id and of a signed revoke/delete proof.
+const MAX_DEVICE_ID: usize = 64;
+const MAX_PROOF: usize = 512;
+/// A deleted account's username can't be registered again for this long.
+const NAME_HOLD_DAYS: i64 = 365;
+/// Sent (with code "revoked") to a device that was signed out from another device.
+const REVOKED: &str = "This device was signed out from another device.";
+/// Sent (with code "deleted") to the other devices of an account that was deleted.
+const DELETED: &str = "This account was deleted.";
 
 /// Content-Security-Policy for the web app. Same as the desktop app's, plus no framing.
 const CSP: &str = "default-src 'self'; connect-src 'self'; img-src 'self' blob: data:; \
@@ -112,6 +123,12 @@ enum ClientMsg {
         sign_pk: String,
         enc_pk: String,
         bundle: String,
+        /// Shown in the list of signed-in devices.
+        #[serde(default)]
+        device: String,
+        /// Random id the device picked for itself (revoke proofs name it).
+        #[serde(default)]
+        device_id: String,
     },
     #[serde(rename_all = "camelCase")]
     Login {
@@ -119,11 +136,20 @@ enum ClientMsg {
         auth_key: String,
         #[serde(default)]
         cursor: i64,
+        #[serde(default)]
+        device: String,
+        #[serde(default)]
+        device_id: String,
     },
+    #[serde(rename_all = "camelCase")]
     Resume {
         token: String,
         #[serde(default)]
         cursor: i64,
+        #[serde(default)]
+        device: String,
+        #[serde(default)]
+        device_id: String,
     },
     FriendRequest {
         #[serde(default)]
@@ -185,6 +211,29 @@ enum ClientMsg {
         bundle: String,
     },
     Logout,
+    /// Lists my signed-in devices.
+    Sessions {
+        #[serde(default)]
+        req: u64,
+    },
+    /// Signs out one of my other devices (by its public session id). `proof` is signed by my
+    /// key; the server only passes it on (the device checks it before deleting its data).
+    RevokeSession {
+        #[serde(default)]
+        req: u64,
+        id: String,
+        #[serde(default)]
+        proof: String,
+    },
+    /// Deletes my account and everything the server stores for it. Needs the password.
+    #[serde(rename_all = "camelCase")]
+    DeleteAccount {
+        #[serde(default)]
+        req: u64,
+        auth_key: String,
+        #[serde(default)]
+        proof: String,
+    },
     Ping,
 }
 
@@ -208,17 +257,30 @@ fn err(req: u64, message: &str) -> String {
     json!({"type": "error", "req": req, "message": message}).to_string()
 }
 
+/// An error the client acts on (by `code`), with the signed proof it checks first.
+fn err_proof(req: u64, code: &str, message: &str, proof: Option<&str>) -> String {
+    json!({"type": "error", "req": req, "code": code, "message": message, "proof": proof}).to_string()
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
+/// Why a connection is ended, with the signed proof for revoked / deleted.
+struct Kick {
+    reason: &'static str,
+    proof: Option<String>,
+}
+
 struct Session {
     id: u64,
+    /// Public id of the device session (sessions.sid).
+    sid: String,
     /// Each frame carries a permit for its size from `budget`, released once written.
     tx: mpsc::UnboundedSender<(String, OwnedSemaphorePermit)>,
     budget: Arc<Semaphore>,
     /// Ends the session with this message (too slow to keep up).
-    kick: Option<oneshot::Sender<&'static str>>,
+    kick: Option<oneshot::Sender<Kick>>,
 }
 
 impl Session {
@@ -298,7 +360,7 @@ impl AppState {
         if let Some(dir) = db_path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        let conn = Connection::open(db_path)
+        let mut conn = Connection::open(db_path)
             .with_context(|| format!("opening database {}", db_path.display()))?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -323,6 +385,7 @@ impl AppState {
                  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
                  last_used INTEGER NOT NULL DEFAULT (unixepoch())
              );
+             CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
              CREATE TABLE IF NOT EXISTS friends (
                  a TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
                  b TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -363,6 +426,37 @@ impl AppState {
              CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )?;
 
+        // 0.3: sessions got a public id, a device name, the device's own id, and a revoked flag
+        // with the signed proof the revoked device checks before deleting its data.
+        {
+            let tx = conn.transaction()?;
+            let cols: Vec<String> = tx
+                .prepare("SELECT name FROM pragma_table_info('sessions')")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (col, def) in [
+                ("sid", "TEXT"),
+                ("name", "TEXT NOT NULL DEFAULT ''"),
+                ("device_id", "TEXT NOT NULL DEFAULT ''"),
+                ("revoked", "INTEGER NOT NULL DEFAULT 0"),
+                ("proof", "TEXT"),
+            ] {
+                if !cols.iter().any(|c| c == col) {
+                    tx.execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {col} {def};"))?;
+                }
+            }
+            tx.execute_batch(
+                "UPDATE sessions SET sid = lower(hex(randomblob(9))) WHERE sid IS NULL;
+                 CREATE UNIQUE INDEX IF NOT EXISTS sessions_sid ON sessions(sid);
+                 -- Usernames of deleted accounts stay reserved for a while, so nobody can pose as them.
+                 CREATE TABLE IF NOT EXISTS released_names (
+                     username TEXT PRIMARY KEY COLLATE NOCASE,
+                     released_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );",
+            )?;
+            tx.commit()?;
+        }
+
         let secret: Option<String> = conn
             .query_row("SELECT value FROM settings WHERE key = 'secret'", [], |r| r.get(0))
             .optional()?;
@@ -401,6 +495,7 @@ impl AppState {
             [SESSION_IDLE_DAYS * 86_400],
         )?;
         db.execute("DELETE FROM friend_requests WHERE created_at < unixepoch() - ?1", [90 * 86_400])?;
+        db.execute("DELETE FROM released_names WHERE released_at < unixepoch() - ?1", [NAME_HOLD_DAYS * 86_400])?;
         Ok(n)
     }
 
@@ -546,7 +641,7 @@ impl AppState {
         for mut s in slow {
             tracing::debug!(user, "client too slow, disconnecting");
             if let Some(kick) = s.kick.take() {
-                let _ = kick.send("Connection too slow, reconnecting");
+                let _ = kick.send(Kick { reason: "Connection too slow, reconnecting", proof: None });
             }
         }
         if now_offline {
@@ -555,12 +650,17 @@ impl AppState {
     }
 
     /// Disconnects a user's devices (except one).
-    fn kick_user(&self, user: &str, except: Option<u64>, reason: &'static str) {
+    fn kick_user(&self, user: &str, except: Option<u64>, reason: &'static str, proof: Option<&str>) {
+        self.kick_where(user, reason, proof, |s| Some(s.id) != except);
+    }
+
+    /// Disconnects the user's connections that match.
+    fn kick_where(&self, user: &str, reason: &'static str, proof: Option<&str>, matches: impl Fn(&Session) -> bool) {
         let mut online = self.online.lock().unwrap();
         if let Some(list) = online.get_mut(user) {
-            for s in list.iter_mut().filter(|s| Some(s.id) != except) {
+            for s in list.iter_mut().filter(|s| matches(s)) {
                 if let Some(k) = s.kick.take() {
-                    let _ = k.send(reason);
+                    let _ = k.send(Kick { reason, proof: proof.map(str::to_string) });
                 }
             }
         }
@@ -582,30 +682,78 @@ impl AppState {
         B64.encode(&h[..16])
     }
 
-    fn create_session(&self, user_id: &str) -> Result<String> {
+    /// Returns the new session's token and public id.
+    fn create_session(&self, user_id: &str, device: &str, device_id: &str) -> Result<(String, String)> {
         let token = random_token(32);
+        let sid = random_token(9);
         let db = self.db.lock().unwrap();
         db.execute(
-            "INSERT INTO sessions(token_hash, user_id) VALUES (?1, ?2)",
-            params![sha256(token.as_bytes()), user_id],
+            "INSERT INTO sessions(token_hash, user_id, sid, name, device_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![sha256(token.as_bytes()), user_id, sid, device_name(device), device_id_of(device_id)],
         )?;
-        Ok(token)
+        Ok((token, sid))
     }
 
-    fn resume_session(&self, token: &str) -> Result<Option<(String, String)>> {
+    /// Ok(None): unknown token. Err(proof) inside: the session was signed out from another
+    /// device (said on every attempt until the idle cleanup removes it).
+    fn resume_session(
+        &self,
+        token: &str,
+        device: &str,
+        device_id: &str,
+    ) -> Result<Option<std::result::Result<(String, String, String), Option<String>>>> {
         let db = self.db.lock().unwrap();
         let hash = sha256(token.as_bytes());
-        let row: Option<(String, String)> = db
+        let row: Option<(String, String, String, bool, Option<String>)> = db
             .query_row(
-                "SELECT a.id, a.username FROM sessions s JOIN accounts a ON a.id = s.user_id WHERE s.token_hash = ?1",
+                "SELECT a.id, a.username, s.sid, s.revoked, s.proof FROM sessions s JOIN accounts a ON a.id = s.user_id
+                 WHERE s.token_hash = ?1",
                 [&hash],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()?;
-        if row.is_some() {
-            db.execute("UPDATE sessions SET last_used = unixepoch() WHERE token_hash = ?1", [&hash])?;
+        let Some((id, username, sid, revoked, proof)) = row else { return Ok(None) };
+        if revoked {
+            return Ok(Some(Err(proof)));
         }
-        Ok(row)
+        db.execute(
+            "UPDATE sessions SET last_used = unixepoch(),
+                 name = CASE WHEN ?2 = '' THEN name ELSE ?2 END,
+                 device_id = CASE WHEN ?3 = '' THEN device_id ELSE ?3 END
+             WHERE token_hash = ?1",
+            params![hash, device_name(device), device_id_of(device_id)],
+        )?;
+        Ok(Some(Ok((id, username, sid))))
+    }
+
+    /// False once the session is revoked or gone (checked again after going online, so a
+    /// revoke that raced with the sign-in isn't missed).
+    fn session_active(&self, token_hash: &[u8]) -> Result<bool> {
+        let db = self.db.lock().unwrap();
+        Ok(db
+            .query_row("SELECT 1 FROM sessions WHERE token_hash = ?1 AND NOT revoked", [token_hash], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    /// My signed-in devices, most recently used first.
+    fn sessions_of(&self, user: &str, current: &str) -> Result<Value> {
+        let online: HashSet<String> =
+            self.online.lock().unwrap().get(user).map(|l| l.iter().map(|s| s.sid.clone()).collect()).unwrap_or_default();
+        let db = self.db.lock().unwrap();
+        let mut stmt = db.prepare_cached(
+            "SELECT sid, name, created_at, last_used, device_id FROM sessions WHERE user_id = ?1 AND NOT revoked
+             ORDER BY last_used DESC",
+        )?;
+        let rows = stmt
+            .query_map([user], |r| {
+                let sid: String = r.get(0)?;
+                Ok(json!({"id": sid, "name": r.get::<_, String>(1)?, "created": r.get::<_, i64>(2)? * 1000,
+                          "lastUsed": r.get::<_, i64>(3)? * 1000, "current": sid == current,
+                          "online": online.contains(&sid), "deviceId": r.get::<_, String>(4)?}))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Value::Array(rows))
     }
 }
 
@@ -752,6 +900,21 @@ fn decode_len(s: &str, len: usize) -> Option<Vec<u8>> {
     B64.decode(s).ok().filter(|b| b.len() == len)
 }
 
+/// A device's own id: letters, digits, - and _ only.
+fn device_id_of(input: &str) -> String {
+    if input.len() <= MAX_DEVICE_ID && input.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        input.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// A device label chosen by the client: printable, trimmed and short.
+fn device_name(input: &str) -> String {
+    let clean: String = input.chars().filter(|c| !c.is_control() && !matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).collect();
+    clean.trim().chars().take(MAX_DEVICE_NAME).collect()
+}
+
 fn sha256(data: &[u8]) -> Vec<u8> {
     Sha256::digest(data).to_vec()
 }
@@ -806,6 +969,8 @@ struct Authed {
     cursor: i64,
     /// Hash of this device's session token (deleted on logout).
     token_hash: Vec<u8>,
+    /// Public id of this device's session.
+    sid: String,
     ip: IpAddr,
     /// When this session last relayed a signal (rate limit).
     last_signal: Mutex<Option<Instant>>,
@@ -841,7 +1006,7 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
                 };
                 send_text(socket, json!({"type": "prelogin", "salt": salt}).to_string()).await?;
             }
-            ClientMsg::Register { username, salt, auth_key, sign_pk, enc_pk, bundle } => {
+            ClientMsg::Register { username, salt, auth_key, sign_pk, enc_pk, bundle, device, device_id } => {
                 if !valid_username(&username) {
                     send_text(socket, err(0, "Username must be 3-24 characters: letters, digits, _ and .")).await?;
                     return Ok(None);
@@ -861,7 +1026,15 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
                 let id = {
                     let db = state.db.lock().unwrap();
                     let mut created = None;
-                    for _ in 0..5 {
+                    let held = db
+                        .query_row(
+                            "SELECT 1 FROM released_names WHERE username = ?1 AND released_at > unixepoch() - ?2",
+                            params![username, NAME_HOLD_DAYS * 86_400],
+                            |_| Ok(()),
+                        )
+                        .optional()?
+                        .is_some();
+                    for _ in 0..if held { 0 } else { 5 } {
                         let id = new_user_id();
                         let n = db.execute(
                             "INSERT INTO accounts(id, username, sign_pk, enc_pk, salt, auth_hash, bundle)
@@ -888,28 +1061,35 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState, ip: IpAddr) -> R
                 };
                 state.registrations.hit(ip);
                 tracing::info!(user = %id, "registered");
-                let token = state.create_session(&id)?;
+                let (token, sid) = state.create_session(&id, &device, &device_id)?;
                 let token_hash = sha256(token.as_bytes());
-                return Ok(Some(Authed { id, username, cursor: 0, token_hash, ip, last_signal: Mutex::new(None), welcome: json!({"token": token}) }));
+                return Ok(Some(Authed { id, username, cursor: 0, token_hash, sid, ip, last_signal: Mutex::new(None), welcome: json!({"token": token}) }));
             }
-            ClientMsg::Login { username, auth_key, cursor } => {
+            ClientMsg::Login { username, auth_key, cursor, device, device_id } => {
                 let account = state.account_by_username(&username)?;
                 let Some(a) = account.filter(|a| auth_matches(a, &auth_key)) else {
                     fail_auth(socket, state, ip, "Wrong username or password").await?;
                     return Ok(None);
                 };
-                let token = state.create_session(&a.id)?;
+                let (token, sid) = state.create_session(&a.id, &device, &device_id)?;
                 let token_hash = sha256(token.as_bytes());
                 let welcome = json!({"token": token, "bundle": a.bundle, "salt": a.salt});
-                return Ok(Some(Authed { id: a.id, username: a.username, cursor, token_hash, ip, last_signal: Mutex::new(None), welcome }));
+                return Ok(Some(Authed { id: a.id, username: a.username, cursor, token_hash, sid, ip, last_signal: Mutex::new(None), welcome }));
             }
-            ClientMsg::Resume { token, cursor } => {
-                let Some((id, username)) = state.resume_session(&token)? else {
-                    fail_auth(socket, state, ip, "Session expired. Sign in again.").await?;
-                    return Ok(None);
+            ClientMsg::Resume { token, cursor, device, device_id } => {
+                let (id, username, sid) = match state.resume_session(&token, &device, &device_id)? {
+                    Some(Ok(row)) => row,
+                    Some(Err(proof)) => {
+                        send_text(socket, err_proof(0, "revoked", REVOKED, proof.as_deref())).await?;
+                        return Ok(None);
+                    }
+                    None => {
+                        fail_auth(socket, state, ip, "Session expired. Sign in again.").await?;
+                        return Ok(None);
+                    }
                 };
                 let token_hash = sha256(token.as_bytes());
-                return Ok(Some(Authed { id, username, cursor, token_hash, ip, last_signal: Mutex::new(None), welcome: json!({}) }));
+                return Ok(Some(Authed { id, username, cursor, token_hash, sid, ip, last_signal: Mutex::new(None), welcome: json!({}) }));
             }
             _ => {
                 send_text(socket, err(0, "Sign in first")).await?;
@@ -938,17 +1118,23 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, permit: Pend
         if list.len() >= MAX_SESSIONS_PER_USER {
             let mut oldest = list.remove(0);
             if let Some(k) = oldest.kick.take() {
-                let _ = k.send("Signed in on too many devices at once");
+                let _ = k.send(Kick { reason: "Signed in on too many devices at once", proof: None });
             }
         }
-        list.push(Session { id: session_id, tx, budget, kick: Some(kick) });
+        list.push(Session { id: session_id, sid: me.sid.clone(), tx, budget, kick: Some(kick) });
         list.len() == 1
     };
     if came_online {
         state.presence_changed(&me.id, true);
     }
 
-    let result = run_session(&mut socket, &state, &me, session_id, &mut rx, &mut kicked).await;
+    let result = if state.session_active(&me.token_hash)? {
+        run_session(&mut socket, &state, &me, session_id, &mut rx, &mut kicked).await
+    } else {
+        // Revoked while signing in.
+        let _ = send_text(&mut socket, err(0, "Session expired. Sign in again.")).await;
+        Ok(())
+    };
 
     let went_offline = {
         let mut online = state.online.lock().unwrap();
@@ -977,7 +1163,7 @@ async fn run_session(
     me: &Authed,
     session_id: u64,
     rx: &mut mpsc::UnboundedReceiver<(String, OwnedSemaphorePermit)>,
-    kicked: &mut oneshot::Receiver<&'static str>,
+    kicked: &mut oneshot::Receiver<Kick>,
 ) -> Result<()> {
     let mut welcome = me.welcome.clone();
     welcome["type"] = json!("welcome");
@@ -1016,8 +1202,13 @@ async fn run_session(
     loop {
         tokio::select! {
             reason = &mut *kicked => {
-                let message = reason.unwrap_or("Disconnected");
-                let _ = send_text(socket, err(0, message)).await;
+                let kick = reason.unwrap_or(Kick { reason: "Disconnected", proof: None });
+                let frame = match kick.reason {
+                    REVOKED => err_proof(0, "revoked", REVOKED, kick.proof.as_deref()),
+                    DELETED => err_proof(0, "deleted", DELETED, kick.proof.as_deref()),
+                    message => err(0, message),
+                };
+                let _ = send_text(socket, frame).await;
                 let _ = socket.send(Message::Close(None)).await;
                 return Ok(());
             },
@@ -1166,16 +1357,18 @@ async fn handle_client_msg(
                 if used + size > MAX_USER_STORAGE {
                     None
                 } else {
-                    let mut known = 0;
+                    // Deleted accounts are skipped (a group with a deleted member keeps working);
+                    // there must be someone besides me.
+                    let mut known = HashSet::new();
                     {
                         let mut stmt = tx.prepare_cached("SELECT 1 FROM accounts WHERE id = ?1")?;
                         for r in &recipients {
                             if stmt.exists([r])? {
-                                known += 1;
+                                known.insert(*r);
                             }
                         }
                     }
-                    if known != recipients.len() {
+                    if !known.iter().any(|r| *r != my) && recipients.iter().any(|r| *r != my) {
                         Some(Err("Unknown recipient"))
                     } else {
                         tx.execute(
@@ -1185,21 +1378,21 @@ async fn handle_client_msg(
                         let seq = tx.last_insert_rowid();
                         {
                             let mut stmt = tx.prepare_cached("INSERT INTO inbox(user_id, msg_id) VALUES (?1, ?2)")?;
-                            for r in recipients.iter().filter(|r| !skip(r)) {
+                            for r in known.iter().filter(|r| !skip(r)) {
                                 stmt.execute(params![r, seq])?;
                             }
                         }
                         tx.commit()?;
-                        Some(Ok(seq))
+                        Some(Ok((seq, known)))
                     }
                 }
             };
             let reply = match seq {
                 None => failed("You've used all your message storage. Old messages expire over time."),
                 Some(Err(e)) => failed(e),
-                Some(Ok(seq)) => {
+                Some(Ok((seq, known))) => {
                     let text = format!(r#"{{"type":"deliver","seq":{seq},"envelope":{env_text}}}"#);
-                    for r in recipients.iter().filter(|r| !skip(r)) {
+                    for r in known.iter().filter(|r| !skip(r)) {
                         state.push_user(r, &text, None);
                     }
                     json!({"type": "sent", "id": meta.id, "seq": seq}).to_string()
@@ -1274,7 +1467,7 @@ async fn handle_client_msg(
                 // A new password signs out every other device.
                 db.execute("DELETE FROM sessions WHERE user_id = ?1 AND token_hash != ?2", params![my, me.token_hash])?;
             }
-            state.kick_user(my, Some(session_id), "Your password was changed. Sign in again.");
+            state.kick_user(my, Some(session_id), "Your password was changed. Sign in again.", None);
             send_text(socket, ok(req)).await?;
         }
 
@@ -1284,6 +1477,73 @@ async fn handle_client_msg(
                 let db = state.db.lock().unwrap();
                 db.execute("DELETE FROM sessions WHERE token_hash = ?1", [&me.token_hash])?;
             }
+            return Ok(false);
+        }
+
+        ClientMsg::Sessions { req } => {
+            let sessions = state.sessions_of(my, &me.sid)?;
+            send_text(socket, json!({"type": "sessions", "req": req, "sessions": sessions}).to_string()).await?;
+        }
+
+        ClientMsg::RevokeSession { req, id, proof } => {
+            if id == me.sid {
+                send_text(socket, err(req, "Use Sign out to sign out this device")).await?;
+                return Ok(true);
+            }
+            let proof = (!proof.is_empty() && proof.len() <= MAX_PROOF).then_some(proof);
+            let n = {
+                let db = state.db.lock().unwrap();
+                db.execute(
+                    "UPDATE sessions SET revoked = 1, proof = ?3 WHERE user_id = ?1 AND sid = ?2 AND NOT revoked",
+                    params![my, id, proof],
+                )?
+            };
+            if n == 0 {
+                send_text(socket, err(req, "That device is already signed out")).await?;
+                return Ok(true);
+            }
+            state.kick_where(my, REVOKED, proof.as_deref(), |s| s.sid == id);
+            send_text(socket, ok(req)).await?;
+        }
+
+        ClientMsg::DeleteAccount { req, auth_key, proof } => {
+            if !state.auth_failures.allowed(me.ip) {
+                send_text(socket, err(req, "Too many failed attempts. Try again in a few minutes.")).await?;
+                return Ok(true);
+            }
+            let account = state.account_by_username(&me.username)?;
+            if !account.is_some_and(|a| a.id == my && auth_matches(&a, &auth_key)) {
+                state.auth_failures.hit(me.ip);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                send_text(socket, err(req, "Password is wrong")).await?;
+                return Ok(true);
+            }
+            // Everyone who might show me in their friends list or requests.
+            let affected: Vec<String> = {
+                let mut db = state.db.lock().unwrap();
+                let tx = db.transaction()?;
+                let affected = {
+                    let mut stmt = tx.prepare(
+                        "SELECT b FROM friends WHERE a = ?1 UNION SELECT to_id FROM friend_requests WHERE from_id = ?1
+                         UNION SELECT from_id FROM friend_requests WHERE to_id = ?1 UNION SELECT a FROM blocks WHERE b = ?1",
+                    )?;
+                    stmt.query_map([my], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+                };
+                tx.execute("INSERT OR REPLACE INTO released_names(username) VALUES (?1)", [&me.username])?;
+                tx.execute("DELETE FROM inbox WHERE user_id = ?1", [my])?;
+                tx.execute("DELETE FROM messages WHERE sender = ?1", [my])?;
+                // Cascades to sessions, friends, friend requests and blocks.
+                tx.execute("DELETE FROM accounts WHERE id = ?1", [my])?;
+                tx.commit()?;
+                affected
+            };
+            tracing::info!(user = %my, "account deleted");
+            let proof = (!proof.is_empty() && proof.len() <= MAX_PROOF).then_some(proof);
+            state.kick_user(my, Some(session_id), DELETED, proof.as_deref());
+            for id in &affected {
+                state.push_friends_snapshot(id);
+            }
+            send_text(socket, ok(req)).await?;
             return Ok(false);
         }
 

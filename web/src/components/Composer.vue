@@ -405,7 +405,8 @@ const tools: Tool[] = [
 
     <!-- Fixed height so the typing line never shifts the layout -->
     <div class="flex h-5 items-center gap-1.5 px-1 pt-1 text-xs text-muted-foreground" aria-live="polite">
-      <template v-if="typingText">
+      <span v-if="chat.state.status !== 'online'" class="truncate">Offline. Messages are sent when you're back online.</span>
+      <template v-else-if="typingText">
         <span class="flex gap-0.5" aria-hidden="true">
           <i v-for="n in 3" :key="n" class="size-1 animate-bounce rounded-full bg-muted-foreground" :style="{ animationDelay: `${(n - 1) * 150}ms` }" />
         </span>

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "E2EE Chat",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "io.github.avmg20.e2eechat",
   "build": {
     "frontendDist": "../dist",
@@ -44,6 +44,15 @@
       "icons/icon.ico"
     ],
     "shortDescription": "End-to-end encrypted chat for your own server",
-    "license": "MIT"
+    "license": "MIT",
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY1NEYxNjMwOUQ4Mzg2NzIKUldSeWhvT2RNQlpQWmFHRFk5dEE2WnF5dDZ6QWs4S2FEV2kwV081OVRYNGFWaVVMeWF1clRHWGEK",
+      "endpoints": [
+        "https://github.com/AVMG20/e2ee-chat/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

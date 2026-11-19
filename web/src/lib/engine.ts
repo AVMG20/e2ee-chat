@@ -1,6 +1,6 @@
 import type { JSONContent } from '@tiptap/core'
 import { clear, createStore, delMany, get, getMany, keys as idbKeys, set, setMany } from 'idb-keyval'
-import { reactive } from 'vue'
+import { reactive, toRaw } from 'vue'
 import {
   type Envelope,
   type Identity,
@@ -17,7 +17,9 @@ import {
   sameKeys,
   seal,
   sealVault,
+  signNotice,
   unb64,
+  verifyNotice,
   unlockIdentity,
 } from './crypto'
 import { docToText, docWithinLimits } from './render'
@@ -28,8 +30,10 @@ import {
   type Contact,
   type Conversation,
   type ConvId,
+  type Device,
   type FriendRequest,
   type Group,
+  type ImportResult,
   type ReplyRef,
   type SearchHit,
   MAX_FILE_BYTES,
@@ -42,8 +46,8 @@ import {
 
 type PayloadConv = { t: 'dm' } | { t: 'g'; id: string }
 type PayloadBody =
-  | { t: 'text'; doc: JSONContent; reply?: ReplyRef }
-  | { t: 'file'; name: string; mime: string; size: number; reply?: ReplyRef }
+  | { t: 'text'; doc: JSONContent; reply?: ReplyRef; fwd?: boolean }
+  | { t: 'file'; name: string; mime: string; size: number; reply?: ReplyRef; fwd?: boolean }
   | { t: 'group'; id: string; name: string; members: string[]; admins?: string[] }
   | { t: 'leave'; id: string }
   /** Group admin actions (only from admins; in groups without an admin list, from anyone). */
@@ -112,11 +116,12 @@ function validHeader(h: PayloadHeader): boolean {
   const validTarget = (t: unknown) => isStr(t) && t.length <= 64
   const validReply = (r: unknown) =>
     r === undefined || (!!r && typeof r === 'object' && validTarget((r as ReplyRef).id) && validId((r as ReplyRef).from) && isStr((r as ReplyRef).preview))
+  const validFwd = (f: unknown) => f === undefined || typeof f === 'boolean'
   switch (b.t) {
     case 'text':
-      return validDoc(b.doc) && validReply(b.reply)
+      return validDoc(b.doc) && validReply(b.reply) && validFwd(b.fwd)
     case 'file':
-      return isStr(b.name) && isStr(b.mime) && typeof b.size === 'number' && validReply(b.reply)
+      return isStr(b.name) && isStr(b.mime) && typeof b.size === 'number' && validReply(b.reply) && validFwd(b.fwd)
     case 'edit':
       return validTarget(b.target) && validDoc(b.doc)
     case 'delete':
@@ -190,9 +195,24 @@ interface ConvMeta {
 /** Per-conversation settings, synced between my devices. The newest `at` wins. */
 interface ConvPrefs {
   muted: boolean
+  /** A timed mute ends at this time (ms). Missing or 0: muted until turned back on. */
+  until?: number
+  /** Notify only when I'm mentioned or replied to. */
+  mentions?: boolean
   pinned: boolean
   archived: boolean
   at: number
+}
+/** A starred message (or, with on false, one that was unstarred), keyed "<conv> <message id>". */
+interface Star {
+  on: boolean
+  at: number
+}
+/** A message waiting for the server to confirm it (kept on disk until then, so it survives going offline). */
+interface Outgoing {
+  env: Envelope
+  conv: ConvId
+  mid: string
 }
 interface Settings {
   readReceipts: boolean
@@ -218,6 +238,8 @@ interface Saved {
   /** Device session token; null once the server says it expired. */
   token: string | null
   identity: Identity
+  /** Random id this device picked for itself; a sign-out of this device must name it. */
+  deviceId?: string
 }
 interface Held {
   seq: number
@@ -232,11 +254,13 @@ const K = {
   groups: 'groups',
   left: 'left',
   prefs: 'prefs',
+  stars: 'stars',
   settings: 'settings',
   profile: 'profile',
   meta: 'meta',
   held: 'held',
   conv: (c: ConvId) => `conv:${c}`,
+  out: (envId: string) => `out:${envId}`,
   file: (mid: string) => `file:${mid}`,
   seen: (mid: string) => `seen:${mid}`,
   avatar: (id: string) => `avatar:${id}`,
@@ -288,6 +312,8 @@ export interface ChatState {
   /** Users I blocked. */
   blocked: FriendRequest[]
   settings: { readReceipts: boolean }
+  /** Starred messages: "<conv> <message id>" → true. Use chat.isStarred(msg). */
+  starred: Dict<true>
 }
 
 export const state = reactive<ChatState>({
@@ -308,6 +334,7 @@ export const state = reactive<ChatState>({
   reads: dict(),
   blocked: [],
   settings: { readReceipts: true },
+  starred: dict(),
 })
 
 // ---------------------------------------------------------------------------
@@ -340,13 +367,24 @@ type ServerMsg =
   | { type: 'sent'; id: string; seq: number }
   | { type: 'failed'; id: string; message: string }
   | { type: 'ok'; req: number }
-  | { type: 'error'; req?: number; message: string }
+  | { type: 'error'; req?: number; message: string; code?: string; proof?: string }
   | { type: 'users'; req: number; users: ServerUser[] }
   | { type: 'vault'; vault: string }
+  | { type: 'sessions'; req: number; sessions: Device[] }
   | { type: 'pong' }
 
 /** An error message from the server (as opposed to a network problem). */
-class ServerError extends Error {}
+class ServerError extends Error {
+  /** Set when the client must act on it: "revoked" (this device was signed out), "deleted" (account deleted). */
+  readonly code?: string
+  /** For revoked / deleted: my signed statement, checked before anything is deleted. */
+  readonly proof?: string
+  constructor(message: string, code?: string, proof?: string) {
+    super(message)
+    this.code = code
+    this.proof = proof
+  }
+}
 
 /** One WebSocket connection. Before sign-in, messages are read with next(); afterwards by a handler. */
 class Conn {
@@ -421,7 +459,7 @@ class Conn {
           reject: (e) => (clearTimeout(timer), reject(e)),
         }
       }))
-    if (m.type === 'error') throw new ServerError(m.message)
+    if (m.type === 'error') throw new ServerError(m.message, isStr(m.code) ? m.code : undefined, isStr(m.proof) ? m.proof : undefined)
     return m
   }
 
@@ -453,6 +491,7 @@ interface VaultData {
   prefs: Dict<ConvPrefs>
   settings: Settings
   profile: Profile
+  stars: Dict<Star>
 }
 
 const defaultSettings = (): Settings => ({ readReceipts: true, at: 0 })
@@ -497,6 +536,10 @@ class Session {
   retiredPins: Dict<Pin> = dict()
   /** The vault as last seen on the server. */
   remoteVault: VaultData | null = null
+  /** Users the server says don't exist (deleted accounts): left out when sending to a group. */
+  gone = new Set<string>()
+  /** Session id → that device's own id, from the last device list (needed to sign it out). */
+  deviceIds = new Map<string, string>()
 
   /** Incoming messages are processed one at a time, in order. */
   queue: Promise<unknown> = Promise.resolve()
@@ -506,8 +549,15 @@ class Session {
   typingSent = { at: 0, conv: '' }
   /** "<conv> <user>" → timer that clears that typing indicator. */
   typingTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  /** Envelope id → local message, for messages awaiting the server's "sent". */
-  pendingSends = new Map<string, { conv: ConvId; mid: string }>()
+  /** Envelope id → my message waiting for the server's "sent" (also on disk, under K.out). */
+  outbox = new Map<string, Outgoing>()
+  /** Envelope ids handed to the current connection (cleared when it drops; re-sent after the next sync). */
+  inflight = new Set<string>()
+  /** Envelope ids sent at least once: they may have arrived even without a "sent". */
+  tried = new Set<string>()
+  stars: Dict<Star> = dict()
+  /** Ends timed mutes on screen. */
+  muteTimer: ReturnType<typeof setTimeout> | undefined
   requests = new Map<number, { resolve: (m: ServerMsg) => void; reject: (e: Error) => void }>()
   nextReq = 1
 
@@ -579,11 +629,11 @@ function scheduleFlush(s: Session) {
 async function flush(s: Session) {
   if (!live(s)) return
   const entries: [IDBValidKey, unknown][] = [
-    [K.cursor, s.cursor],
     [K.pins, { ...s.pins }],
     [K.groups, rawGroups()],
     [K.left, { ...s.left }],
     [K.prefs, { ...s.prefs }],
+    [K.stars, { ...s.stars }],
     [K.settings, s.settings],
     [K.profile, s.profile],
     [K.meta, { ...s.meta }],
@@ -594,9 +644,19 @@ async function flush(s: Session) {
     if (list) entries.push([K.conv(c), list])
   }
   for (const mid of s.newSeen) entries.push([K.seen(mid), 1])
+  // Last: if anything before it can't be stored, the cursor stays put and the server sends those messages again.
+  entries.push([K.cursor, s.cursor])
+  const dirty = [...s.dirtyConvs]
+  const seen = s.newSeen
   s.dirtyConvs.clear()
   s.newSeen = []
-  await setMany(entries, db)
+  try {
+    await setMany(entries, db)
+  } catch (e) {
+    for (const c of dirty) s.dirtyConvs.add(c)
+    s.newSeen.push(...seen)
+    throw e
+  }
 }
 
 function markSeen(s: Session, mid: string) {
@@ -632,7 +692,20 @@ function validGroup(g: unknown): g is Group {
 function validPrefs(p: unknown): p is ConvPrefs {
   if (!p || typeof p !== 'object') return false
   const q = p as ConvPrefs
-  return typeof q.muted === 'boolean' && typeof q.pinned === 'boolean' && typeof q.archived === 'boolean' && typeof q.at === 'number'
+  return (
+    typeof q.muted === 'boolean' && typeof q.pinned === 'boolean' && typeof q.archived === 'boolean' && typeof q.at === 'number' &&
+    (q.until === undefined || (typeof q.until === 'number' && Number.isFinite(q.until))) &&
+    (q.mentions === undefined || typeof q.mentions === 'boolean')
+  )
+}
+
+const starKey = (conv: ConvId, mid: string) => `${conv} ${mid}`
+/** Most stars (and unstar markers) kept in the vault; the oldest markers go first. */
+const MAX_STARS = 3000
+
+function validStarKey(k: string): boolean {
+  const sp = k.indexOf(' ')
+  return sp > 0 && validConvId(k.slice(0, sp)) && k.length - sp - 1 <= 100
 }
 
 const validConvId = (c: string): c is ConvId =>
@@ -642,7 +715,9 @@ const MAX_AVATAR_BYTES = 96 * 1024
 
 function parseVault(raw: unknown): VaultData {
   const v = (raw && typeof raw === 'object' ? raw : {}) as Partial<VaultData>
-  const out: VaultData = { pins: dict(), groups: dict(), left: dict(), prefs: dict(), settings: defaultSettings(), profile: defaultProfile() }
+  const out: VaultData = {
+    pins: dict(), groups: dict(), left: dict(), prefs: dict(), settings: defaultSettings(), profile: defaultProfile(), stars: dict(),
+  }
   for (const [id, p] of Object.entries(dict(v.pins))) {
     try {
       if (validId(id) && validPin(p)) out.pins[id] = { ...p, name: cleanLabel(p.name, 32) }
@@ -657,7 +732,15 @@ function parseVault(raw: unknown): VaultData {
     }
   }
   for (const [c, p] of Object.entries(dict(v.prefs))) {
-    if (validConvId(c) && validPrefs(p)) out.prefs[c] = { muted: p.muted, pinned: p.pinned, archived: p.archived, at: p.at }
+    if (validConvId(c) && validPrefs(p)) {
+      const q: ConvPrefs = { muted: p.muted, pinned: p.pinned, archived: p.archived, at: p.at }
+      if (p.until) q.until = p.until
+      if (p.mentions) q.mentions = true
+      out.prefs[c] = q
+    }
+  }
+  for (const [k, st] of Object.entries(dict<Star>(v.stars))) {
+    if (validStarKey(k) && st && typeof st.on === 'boolean' && typeof st.at === 'number') out.stars[k] = { on: st.on, at: st.at }
   }
   const st = v.settings as Settings | undefined
   if (st && typeof st.readReceipts === 'boolean' && typeof st.at === 'number') out.settings = { readReceipts: st.readReceipts, at: st.at }
@@ -678,7 +761,7 @@ function vaultBehind(s: Session): boolean {
   if (!r) {
     return (
       Object.keys(s.pins).length > 0 || Object.keys(state.groups).length > 0 || Object.keys(s.left).length > 0 ||
-      Object.keys(s.prefs).length > 0 || s.settings.at > 0 || s.profile.at > 0
+      Object.keys(s.prefs).length > 0 || s.settings.at > 0 || s.profile.at > 0 || Object.keys(s.stars).length > 0
     )
   }
   for (const [id, p] of Object.entries(s.pins)) if (!r.pins[id] || p.at > r.pins[id]!.at) return true
@@ -687,6 +770,7 @@ function vaultBehind(s: Session): boolean {
   // Removed here (e.g. I was kicked): the server's copy mustn't bring it back.
   for (const [id, g] of Object.entries(r.groups)) if (!state.groups[id] && g.members.includes(s.me)) return true
   for (const [c, p] of Object.entries(s.prefs)) if (!r.prefs[c] || p.at > r.prefs[c]!.at) return true
+  for (const [k, st] of Object.entries(s.stars)) if (!r.stars[k] || st.at > r.stars[k]!.at) return true
   if (s.settings.at > r.settings.at || s.profile.at > r.profile.at || s.profile.sentAt > r.profile.sentAt) return true
   return false
 }
@@ -705,6 +789,7 @@ async function pushVault(s: Session) {
     prefs: { ...s.prefs },
     settings: s.settings,
     profile: s.profile,
+    stars: { ...s.stars },
   }
   try {
     await request(s, { type: 'vault_put', vault: sealVault(s.identity, data) })
@@ -745,6 +830,14 @@ async function applyVault(s: Session, sealed: string | null | undefined) {
     for (const [c, p] of Object.entries(remote.prefs)) {
       if (!s.prefs[c] || p.at > s.prefs[c]!.at) s.prefs[c] = p
     }
+    let starsChanged = false
+    for (const [k, st] of Object.entries(remote.stars)) {
+      if (!s.stars[k] || st.at > s.stars[k]!.at) {
+        s.stars[k] = st
+        starsChanged = true
+      }
+    }
+    if (starsChanged) showStars(s)
     if (remote.settings.at > s.settings.at) {
       s.settings = remote.settings
       state.settings = { readReceipts: s.settings.readReceipts }
@@ -922,6 +1015,7 @@ async function lookup(s: Session, ids: string[]) {
   const res = await request(s, { type: 'lookup', ids: missing })
   if (res.type !== 'users' || !Array.isArray(res.users)) return
   for (const u of res.users) applyServerUser(s, u, { pin: false })
+  for (const id of missing) if (!s.serverUsers[id]) s.gone.add(id)
 }
 
 /** Makes sure we have pinned keys for these users (trust on first use). */
@@ -978,17 +1072,32 @@ function recipientKeys(s: Session, ids: string[]) {
 // Conversations & messages
 // ---------------------------------------------------------------------------
 
+/** Muted right now: a timed mute that ran out no longer counts. */
+function isMuted(p: ConvPrefs | undefined, now = Date.now()): boolean {
+  return !!p?.muted && (!p.until || now < p.until)
+}
+
 function refreshConversations() {
   const s = session
   if (!s) return
+  const now = Date.now()
+  let nextEnd = Infinity
   const list: Conversation[] = []
   const add = (id: ConvId, kind: 'dm' | 'group', title: string) => {
     const m = s.meta[id] ?? { unread: 0, lastTs: 0, preview: '' }
     const p = s.prefs[id]
+    const muted = isMuted(p, now)
+    if (muted && p!.until) nextEnd = Math.min(nextEnd, p!.until)
     list.push({
       id, kind, title, unread: m.unread, lastTs: m.lastTs, preview: m.preview,
-      muted: !!p?.muted, pinned: !!p?.pinned, archived: !!p?.archived,
+      muted, mutedUntil: muted && p!.until ? p!.until : null, mentionsOnly: !!p?.mentions,
+      pinned: !!p?.pinned, archived: !!p?.archived,
     })
+  }
+  clearTimeout(s.muteTimer)
+  s.muteTimer = undefined
+  if (nextEnd < Infinity) {
+    s.muteTimer = setTimeout(() => live(s) && refreshConversations(), Math.min(Math.max(nextEnd - now + 50, 1000), 2 ** 31 - 1))
   }
   for (const g of Object.values(state.groups)) add(`g:${g.id}`, 'group', g.name)
   for (const c of Object.values(state.contacts)) {
@@ -1008,7 +1117,18 @@ function previewOf(m: ChatMessage): string {
 function loadConv(s: Session, conv: ConvId): Promise<ChatMessage[]> {
   let p = s.convs.get(conv)
   if (!p) {
-    p = get<ChatMessage[]>(K.conv(conv), db).then((l) => (Array.isArray(l) ? l : []))
+    p = get<ChatMessage[]>(K.conv(conv), db).then((l) => {
+      const list = Array.isArray(l) ? l : []
+      // "Sending" without a queued copy: the app closed between the server's "sent" and saving it,
+      // or it's from an older version. Shown as failed, so it can be sent again (same id: no duplicates).
+      for (const m of list) {
+        if (m.status === 'sending' && m.from === s.me && !s.outbox.has(m.id.slice(s.me.length + 1))) {
+          m.status = 'failed'
+          s.dirtyConvs.add(conv)
+        }
+      }
+      return list
+    })
     s.convs.set(conv, p)
   }
   return p
@@ -1032,7 +1152,7 @@ async function appendMessage(s: Session, m: ChatMessage, countUnread: boolean) {
   s.meta[m.conv] = meta
   if (countUnread && !s.fresh) {
     const p = s.prefs[m.conv]
-    if (p?.archived && !p.muted && m.ts > p.at) setPrefs(s, m.conv, { archived: false })
+    if (p?.archived && !isMuted(p) && m.ts > p.at) setPrefs(s, m.conv, { archived: false })
     if (state.active === m.conv) scheduleRead(s)
   }
   scheduleFlush(s)
@@ -1163,10 +1283,34 @@ function handleSignal(s: Session, env: Envelope) {
 
 function setPrefs(s: Session, conv: ConvId, patch: Partial<Omit<ConvPrefs, 'at'>>) {
   const cur = s.prefs[conv] ?? { muted: false, pinned: false, archived: false, at: 0 }
-  s.prefs[conv] = { ...cur, ...patch, at: Math.max(Date.now(), cur.at + 1) }
+  const next: ConvPrefs = { ...cur, ...patch, at: Math.max(Date.now(), cur.at + 1) }
+  if (!next.muted || !next.until) delete next.until
+  if (!next.mentions) delete next.mentions
+  s.prefs[conv] = next
   scheduleFlush(s)
   scheduleVaultPush(s)
   refreshConversations()
+}
+
+/** Puts the starred messages in state.starred. */
+function showStars(s: Session) {
+  const out = dict<true>()
+  for (const [k, st] of Object.entries(s.stars)) if (st.on) out[k] = true
+  state.starred = out
+}
+
+/** Does this message from someone else mention me (@my name) or reply to one of my messages? */
+function mentionsMe(s: Session, m: ChatMessage): boolean {
+  if (!m.from || m.from === s.me) return false
+  if (m.reply?.from === s.me) return true
+  if (m.kind !== 'text') return false
+  const name = s.saved.username.toLowerCase()
+  const text = docToText(m.doc).toLowerCase()
+  for (let i = text.indexOf('@' + name); i >= 0; i = text.indexOf('@' + name, i + 1)) {
+    const after = text[i + 1 + name.length]
+    if (after === undefined || !/[a-z0-9_.]/.test(after)) return true
+  }
+  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,7 +1479,7 @@ async function receive(s: Session, seq: number, env: Envelope) {
 
 async function receiveEnvelope(s: Session, seq: number, env: Envelope) {
   if (!live(s)) return
-  if (!env || typeof env !== 'object' || !isStr(env.id) || !validId(env.from) || !Array.isArray(env.keys)) return
+  if (!env || typeof env !== 'object' || !isStr(env.id) || env.id.length > 64 || !validId(env.from) || !Array.isArray(env.keys)) return
   if (typeof env.ts !== 'number' || !Number.isFinite(env.ts)) return
   const sender = env.from
   const mine = sender === s.me
@@ -1527,6 +1671,7 @@ async function handlePayload(
 
   const msg: ChatMessage = { id: mid, conv, from: sender, ts, kind: 'text', status: mine ? 'sent' : 'received' }
   if (body.reply) msg.reply = await resolveReply(s, conv, body.reply)
+  if (body.fwd) msg.forwarded = true
   if (body.t === 'text') {
     msg.doc = body.doc
   } else {
@@ -1557,11 +1702,30 @@ async function retryHeld(s: Session) {
   scheduleFlush(s)
 }
 
+/** The server has my message: done with it. */
 async function confirmSent(s: Session, envId: string) {
-  const p = s.pendingSends.get(envId)
+  const p = s.outbox.get(envId)
   if (!p) return
-  s.pendingSends.delete(envId)
+  dropOutgoing(s, envId)
   await updateMessageStatus(s, p.conv, p.mid, 'sent')
+}
+
+function dropOutgoing(s: Session, envId: string) {
+  s.outbox.delete(envId)
+  s.inflight.delete(envId)
+  s.tried.delete(envId)
+  void delMany([K.out(envId)], db).catch(noop)
+}
+
+/** Hands queued messages to the server, oldest first. Called once a (re)connected device has caught up. */
+function flushOutbox(s: Session) {
+  if (!live(s) || !s.conn) return
+  const queued = [...s.outbox.entries()].filter(([id]) => !s.inflight.has(id)).sort((a, b) => a[1].env.ts - b[1].env.ts)
+  for (const [id, o] of queued) {
+    if (!s.conn.send({ type: 'send', envelope: o.env })) return
+    s.inflight.add(id)
+    s.tried.add(id)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1572,15 +1736,19 @@ function dispatch(s: Session, m: ServerMsg) {
   if (!live(s)) return
   // Replies to requests are handled right away, never behind the message queue.
   const req = 'req' in m && typeof m.req === 'number' && m.req > 0 ? m.req : 0
-  if (req && (m.type === 'ok' || m.type === 'users' || m.type === 'prelogin' || m.type === 'error')) {
+  if (req && (m.type === 'ok' || m.type === 'users' || m.type === 'prelogin' || m.type === 'sessions' || m.type === 'error')) {
     const r = s.requests.get(req)
     s.requests.delete(req)
-    if (m.type === 'error') r?.reject(new ServerError(m.message))
+    if (m.type === 'error') r?.reject(new ServerError(m.message, isStr(m.code) ? m.code : undefined))
     else r?.resolve(m)
     return
   }
   switch (m.type) {
     case 'error':
+      if (!req && (m.code === 'revoked' || m.code === 'deleted')) {
+        void signedOut(s, m.code, m.message, m.proof)
+        return
+      }
       state.error = m.message
       return
     case 'presence': {
@@ -1595,9 +1763,9 @@ function dispatch(s: Session, m: ServerMsg) {
       return
     case 'sent':
     case 'failed': {
-      const p = isStr(m.id) ? s.pendingSends.get(m.id) : undefined
+      const p = isStr(m.id) ? s.outbox.get(m.id) : undefined
       if (p) {
-        s.pendingSends.delete(m.id)
+        dropOutgoing(s, m.id)
         void updateMessageStatus(s, p.conv, p.mid, m.type === 'sent' ? 'sent' : 'failed')
       }
       if (m.type === 'failed') state.error = m.message
@@ -1620,7 +1788,12 @@ async function handleQueued(s: Session, m: ServerMsg) {
       await retryHeld(s)
       state.syncing = false
       s.fresh = false
-      await flush(s)
+      try {
+        await flush(s)
+      } catch (e) {
+        console.warn('saving failed', e)
+      }
+      flushOutbox(s)
       refreshProfile(s)
       scheduleRead(s)
       break
@@ -1651,8 +1824,9 @@ function onClosed(s: Session, conn: Conn) {
   clearInterval(s.pingTimer)
   for (const r of s.requests.values()) r.reject(new Error('Lost the connection to the server'))
   s.requests.clear()
-  // Unconfirmed sends: shown as failed, fixed up if the server's copy shows up after reconnecting.
-  for (const p of s.pendingSends.values()) void updateMessageStatus(s, p.conv, p.mid, 'failed')
+  // Unconfirmed sends stay queued: after reconnecting, the catch-up confirms the ones that
+  // arrived (my own copy comes back) and the rest are sent again.
+  s.inflight.clear()
   if (!live(s)) return
   state.status = 'connecting'
   state.syncing = false
@@ -1671,12 +1845,16 @@ async function reconnect(s: Session) {
   let w: ServerMsg
   try {
     conn = await Conn.open(s.saved.server)
-    conn.send({ type: 'resume', token: s.saved.token, cursor: s.cursor })
+    conn.send({ type: 'resume', token: s.saved.token, cursor: s.cursor, device: deviceName(), deviceId: s.saved.deviceId })
     w = await conn.next()
     if (w.type !== 'welcome') throw new Error('Unexpected reply from the server')
   } catch (e) {
     conn?.close()
     if (!live(s)) return
+    if (e instanceof ServerError && e.code === 'revoked') {
+      await signedOut(s, e.code, e.message, e.proof)
+      return
+    }
     if (e instanceof ServerError && /expired|sign in/i.test(e.message)) {
       await expire(s, e.message)
       return
@@ -1690,6 +1868,41 @@ async function reconnect(s: Session) {
     return
   }
   attach(s, conn, w)
+}
+
+const revokeNotice = (me: string, deviceId: string) => `revoke ${me} ${deviceId}`
+const deleteNotice = (me: string) => `delete ${me}`
+
+/**
+ * This device was signed out from another device, or the account was deleted. Local data is only
+ * deleted when my own key signed that (the server can't fake it); otherwise it's kept, like an expired session.
+ */
+async function signedOut(s: Session, code: 'revoked' | 'deleted', message: string, proof: string | undefined) {
+  if (session !== s) return
+  const text = code === 'deleted' ? deleteNotice(s.me) : revokeNotice(s.me, s.saved.deviceId ?? '')
+  const genuine = (code === 'deleted' || !!s.saved.deviceId) && verifyNotice(s.identity.signPk, text, proof)
+  if (genuine) await wipe(s, message)
+  else await expire(s, code === 'deleted' ? 'This account is no longer available. Sign in again.' : 'You were signed out. Sign in again.')
+}
+
+/** Deletes everything on this device and goes back to the sign-in screen. */
+async function wipe(s: Session, message: string) {
+  if (session !== s) return
+  session = null
+  stop(s)
+  await s.queue
+  await clear(db)
+  forgetUsername()
+  resetState()
+  state.error = message
+}
+
+function forgetUsername() {
+  try {
+    localStorage.removeItem(LS_USER)
+  } catch {
+    /* storage disabled */
+  }
 }
 
 /** The server no longer accepts this device's session: back to the sign-in screen, keeping local data. */
@@ -1709,6 +1922,7 @@ function stop(s: Session) {
   clearTimeout(s.vaultTimer)
   clearTimeout(s.profileTimer)
   clearTimeout(s.readTimer)
+  clearTimeout(s.muteTimer)
   s.conn?.close()
   for (const r of s.requests.values()) r.reject(new Error('Signed out'))
   s.requests.clear()
@@ -1734,18 +1948,20 @@ function resetState() {
     reads: dict(),
     blocked: [],
     settings: { readReceipts: true },
+    starred: dict(),
   } satisfies Partial<ChatState>)
 }
 
 /** Loads this device's local data into a new session and makes it current. */
 async function loadSession(saved: Saved): Promise<Session> {
   const s = new Session(saved)
-  const [cursor, pins, groups, left, prefs, settings, profile, meta, held] = await getMany(
-    [K.cursor, K.pins, K.groups, K.left, K.prefs, K.settings, K.profile, K.meta, K.held],
+  const [cursor, pins, groups, left, prefs, settings, profile, meta, held, stars] = await getMany(
+    [K.cursor, K.pins, K.groups, K.left, K.prefs, K.settings, K.profile, K.meta, K.held, K.stars],
     db,
   )
   s.cursor = typeof cursor === 'number' ? cursor : 0
-  const vault = parseVault({ pins, groups, left, prefs, settings, profile })
+  const vault = parseVault({ pins, groups, left, prefs, settings, profile, stars })
+  s.stars = vault.stars
   s.pins = vault.pins
   s.left = vault.left
   s.prefs = vault.prefs
@@ -1754,11 +1970,21 @@ async function loadSession(saved: Saved): Promise<Session> {
   s.meta = dict(meta)
   s.held = Array.isArray(held) ? held : []
   const avatarKeys: string[] = []
+  const outKeys: string[] = []
   for (const key of await idbKeys(db)) {
     if (!isStr(key)) continue
     if (key.startsWith('seen:')) s.seen.add(key.slice(5))
     else if (key.startsWith('avatar:')) avatarKeys.push(key)
+    else if (key.startsWith('out:')) outKeys.push(key)
   }
+  const outgoing = await getMany<Outgoing | undefined>(outKeys, db)
+  outKeys.forEach((key, i) => {
+    const o = outgoing[i]
+    if (o?.env && validConvId(o.conv) && isStr(o.mid)) {
+      s.outbox.set(key.slice(4), o)
+      s.tried.add(key.slice(4)) // may have reached the server before the app closed
+    }
+  })
   const avatars = await getMany<StoredAvatar | undefined>(avatarKeys, db)
   avatarKeys.forEach((key, i) => {
     const a = avatars[i]
@@ -1773,13 +1999,14 @@ async function loadSession(saved: Saved): Promise<Session> {
   showMyAvatar(s)
   state.groups = vault.groups
   for (const id of Object.keys(s.pins)) updateContactFromPin(s, id)
+  showStars(s)
   refreshConversations()
   void navigator.storage?.persist?.().catch(noop)
   return s
 }
 
 /** Signs in on a fresh connection: keeps local data if it belongs to this account, else wipes it. */
-async function begin(conn: Conn, w: Welcome, server: string, identity: Identity, token: string, cursor: number) {
+async function begin(conn: Conn, w: Welcome, server: string, identity: Identity, token: string, cursor: number, deviceId: string) {
   if (!validId(w.me?.id)) throw new Error('Unexpected reply from the server')
   const prev = await get<Saved>(K.session, db)
   let replay = false
@@ -1788,7 +2015,7 @@ async function begin(conn: Conn, w: Welcome, server: string, identity: Identity,
     replay = cursor > 0 // the server is syncing from a cursor that belonged to other data
     cursor = 0
   }
-  const saved: Saved = { server, id: w.me.id, username: w.me.username, token, identity }
+  const saved: Saved = { server, id: w.me.id, username: w.me.username, token, identity, deviceId }
   await setMany([[K.session, saved], [K.cursor, cursor]], db)
   try {
     localStorage.setItem(LS_USER, saved.username)
@@ -1853,6 +2080,11 @@ export async function restore(): Promise<boolean> {
   }
   const saved = await get<Saved>(K.session, db)
   if (!saved?.token || !saved.identity || !validId(saved.id)) return false
+  if (!saved.deviceId) {
+    // Signed in with an older version: pick an id now (the server learns it on resume).
+    saved.deviceId = randomId()
+    await set(K.session, saved, db)
+  }
   const s = await loadSession(saved)
   state.status = 'connecting'
   void reconnect(s)
@@ -1866,6 +2098,7 @@ export async function register(serverInput: string, usernameInput: string, passw
   const salt = randomSalt()
   const keys = await deriveFromPassword(password, salt)
   const identity = generateIdentity()
+  const deviceId = randomId()
   const conn = await Conn.open(server)
   try {
     conn.send({
@@ -1876,10 +2109,12 @@ export async function register(serverInput: string, usernameInput: string, passw
       signPk: b64(identity.signPk),
       encPk: b64(identity.encPk),
       bundle: lockIdentity(identity, keys.lockKey, bundleName(username)),
+      device: deviceName(),
+      deviceId,
     })
     const w = await conn.next()
     if (w.type !== 'welcome' || !isStr(w.token)) throw new Error('Unexpected reply from the server')
-    await begin(conn, w, server, identity, w.token, 0)
+    await begin(conn, w, server, identity, w.token, 0, deviceId)
   } catch (e) {
     conn.close()
     throw e
@@ -1899,7 +2134,8 @@ export async function login(serverInput: string, usernameInput: string, password
     const prev = await get<Saved>(K.session, db)
     const sameAccount = prev?.server === server && bundleName(prev.username) === bundleName(username)
     const cursor = sameAccount ? ((await get<number>(K.cursor, db)) ?? 0) : 0
-    conn.send({ type: 'login', username, authKey: b64(keys.authKey), cursor })
+    const deviceId = randomId()
+    conn.send({ type: 'login', username, authKey: b64(keys.authKey), cursor, device: deviceName(), deviceId })
     const w = await conn.next()
     if (w.type !== 'welcome' || !isStr(w.token) || !isStr(w.bundle)) throw new Error('Unexpected reply from the server')
     let identity: Identity
@@ -1908,7 +2144,7 @@ export async function login(serverInput: string, usernameInput: string, password
     } catch {
       throw new Error('Could not unlock your keys with this password')
     }
-    await begin(conn, w, server, identity, w.token, cursor)
+    await begin(conn, w, server, identity, w.token, cursor, deviceId)
   } catch (e) {
     conn.close()
     throw e
@@ -2086,13 +2322,15 @@ export async function loadOlder(): Promise<boolean> {
   return true
 }
 
-/** Searches the message history on this device. All words must match; newest first. */
-export async function search(query: string, limit = 50): Promise<SearchHit[]> {
+/** Searches the message history on this device. All words must match; newest first. `conv` limits it to one chat. */
+export async function search(query: string, opts: { conv?: ConvId; limit?: number } = {}): Promise<SearchHit[]> {
   const s = requireSession()
+  const limit = opts.limit ?? 50
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
   if (!terms.length) return []
   const hits: SearchHit[] = []
   for (const c of state.conversations) {
+    if (opts.conv && c.id !== opts.conv) continue
     const cached = s.convs.get(c.id)
     const list = cached ? await cached : ((await get<ChatMessage[]>(K.conv(c.id), db)) ?? [])
     if (session !== s) return []
@@ -2127,36 +2365,63 @@ async function targetsOf(s: Session, conv: ConvId): Promise<{ pc: PayloadConv; t
 /** Everyone in a member list except me, skipping accounts that no longer exist. */
 async function groupRecipients(s: Session, members: string[]): Promise<string[]> {
   await ensurePinned(s, members).catch(noop)
-  const to = members.filter((id) => id !== s.me && s.pins[id])
+  await lookup(s, members).catch(noop) // notices deleted accounts
+  const to = members.filter((id) => id !== s.me && s.pins[id] && !s.gone.has(id))
   if (to.length === 0) throw new Error('Nobody else is in this group')
   return to
 }
 
-async function sendContent(header: (pc: PayloadConv) => PayloadHeader, local: Partial<ChatMessage>, attachment?: Uint8Array) {
+/**
+ * Sends a chat message to `conv`. It's shown right away and queued on disk; while offline it
+ * stays "sending" and goes out after reconnecting.
+ */
+async function sendContent(
+  conv: ConvId,
+  header: (pc: PayloadConv) => PayloadHeader,
+  local: Partial<ChatMessage>,
+  attachment?: Uint8Array,
+) {
   const s = requireSession()
-  const conv = state.active // the conversation on screen when the user hit send
-  if (!conv) throw new Error('Open a conversation first')
   const { pc, to } = await targetsOf(s, conv)
   const id = randomId()
   const mid = msgId(s.me, id)
   const ts = Date.now()
-  recipientKeys(s, to) // throws before anything is shown if a key changed
+  // Sealed now, with the keys pinned now: throws before anything is shown if a key changed.
+  const env = seal(s.identity, s.me, recipientKeys(s, to), encodePayload(header(pc), attachment), id, ts)
   const msg: ChatMessage = { id: mid, conv, from: s.me, ts, kind: 'text', status: 'sending', ...local }
   if (attachment) {
     if (!live(s)) return
     await set(K.file(mid), attachment, db)
   }
   if (!live(s)) return
+  try {
+    await queueOutgoing(s, { env, conv, mid })
+  } catch (e) {
+    if (attachment) await delMany([K.file(mid)], db).catch(noop)
+    throw new Error(`Couldn't save the message on this device: ${e instanceof Error ? e.message : e}`)
+  }
+  if (!live(s)) return
   await appendMessage(s, msg, false)
   if (s.prefs[conv]?.archived) setPrefs(s, conv, { archived: false })
   if (state.active === conv) state.firstUnread = null // replying means I've read it
-  s.pendingSends.set(id, { conv, mid })
-  try {
-    sendEnvelope(s, to, header(pc), attachment, id, ts)
-  } catch (e) {
-    s.pendingSends.delete(id)
-    await updateMessageStatus(s, conv, mid, 'failed')
-    throw e
+  sendQueued(s, id)
+}
+
+/** Stores a sealed message until the server confirms it. */
+async function queueOutgoing(s: Session, o: Outgoing) {
+  const id = o.env.id
+  await set(K.out(id), o, db) // if this fails, nothing is queued
+  s.outbox.set(id, o)
+  markSeen(s, msgId(s.me, id))
+}
+
+/** Sends a queued message now if connected and caught up (otherwise it goes after the next sync). */
+function sendQueued(s: Session, id: string) {
+  const o = s.outbox.get(id)
+  if (!o || !s.conn || state.syncing || s.inflight.has(id)) return
+  if (s.conn.send({ type: 'send', envelope: o.env })) {
+    s.inflight.add(id)
+    s.tried.add(id)
   }
 }
 
@@ -2165,9 +2430,15 @@ function replyRef(m?: ChatMessage | null): ReplyRef | undefined {
   return { id: m.id, from: m.from, preview: previewOf(m).slice(0, 120) }
 }
 
+function activeConv(): ConvId {
+  const conv = state.active // the conversation on screen when the user hit send
+  if (!conv) throw new Error('Open a conversation first')
+  return conv
+}
+
 export async function sendText(doc: JSONContent, replyTo?: ChatMessage | null) {
   const reply = replyRef(replyTo)
-  await sendContent((conv) => ({ conv, body: { t: 'text', doc, reply } }), { kind: 'text', doc, reply })
+  await sendContent(activeConv(), (conv) => ({ conv, body: { t: 'text', doc, reply } }), { kind: 'text', doc, reply })
 }
 
 export async function sendFile(file: File, replyTo?: ChatMessage | null) {
@@ -2179,6 +2450,7 @@ export async function sendFile(file: File, replyTo?: ChatMessage | null) {
   const name = cleanLabel(file.name, 200) || 'file'
   const mime = (file.type || 'application/octet-stream').slice(0, 100)
   await sendContent(
+    activeConv(),
     (conv) => ({ conv, body: { t: 'file', name, mime, size: bytes.length, reply } }),
     { kind: 'file', file: { name, mime, size: bytes.length }, reply },
     bytes,
@@ -2276,8 +2548,13 @@ async function sendChange(msg: ChatMessage, body: PayloadBody) {
   if (msg.kind === 'system') return
   if (body.t !== 'react' && msg.from !== s.me) throw new Error('You can only change your own messages')
   if (msg.status === 'failed' || msg.status === 'sending') {
+    const envId = msg.id.slice(s.me.length + 1)
     // Never reached anyone (or not yet): a delete only needs to happen here.
-    if (body.t === 'delete' && msg.status === 'failed') return applyChange(s, msg.conv, s.me, body, Date.now())
+    if (body.t === 'delete' && (msg.status === 'failed' || (s.outbox.has(envId) && !s.tried.has(envId)))) {
+      if (s.outbox.has(envId)) dropOutgoing(s, envId)
+      return applyChange(s, msg.conv, s.me, body, Date.now())
+    }
+    if (body.t === 'delete') throw new Error("This message may already be on its way. Delete it once it's sent.")
     throw new Error("This message hasn't been sent yet")
   }
   const { pc, to } = await targetsOf(s, msg.conv)
@@ -2338,9 +2615,36 @@ export function unblockUser(id: string) {
   return friendOp('unblock', id)
 }
 
-/** Mute, pin or archive a conversation (synced to my other devices). */
-export function setConvPrefs(conv: ConvId, patch: Partial<{ muted: boolean; pinned: boolean; archived: boolean }>) {
-  setPrefs(requireSession(), conv, patch)
+/**
+ * Mute, pin or archive a conversation (synced to my other devices). `mutedUntil` (ms) makes a mute
+ * end by itself; muting without it (or with null) lasts until turned off. `mentionsOnly`: notify only
+ * when I'm mentioned or replied to.
+ */
+export function setConvPrefs(
+  conv: ConvId,
+  patch: Partial<{ muted: boolean; mutedUntil: number | null; mentionsOnly: boolean; pinned: boolean; archived: boolean }>,
+) {
+  const s = requireSession()
+  const p: Partial<Omit<ConvPrefs, 'at'>> = {}
+  if (patch.muted !== undefined) {
+    p.muted = patch.muted
+    p.until = patch.muted && patch.mutedUntil ? patch.mutedUntil : 0
+  } else if (patch.mutedUntil !== undefined) {
+    p.until = patch.mutedUntil ?? 0
+  }
+  if (patch.mentionsOnly !== undefined) p.mentions = patch.mentionsOnly
+  if (patch.pinned !== undefined) p.pinned = patch.pinned
+  if (patch.archived !== undefined) p.archived = patch.archived
+  setPrefs(s, conv, p)
+}
+
+/** Should this incoming message notify (sound / notification)? False in muted chats, and in mentions-only chats unless it mentions me. */
+export function shouldNotify(m: ChatMessage): boolean {
+  const s = session
+  if (!s) return false
+  const p = s.prefs[m.conv]
+  if (isMuted(p)) return false
+  return !p?.mentions || mentionsMe(s, m)
 }
 
 /** Whether others see when I've read their messages. My own devices always sync read state. */
@@ -2352,18 +2656,32 @@ export function setReadReceipts(on: boolean) {
   scheduleVaultPush(s)
 }
 
-/** Crops to a square and shrinks to fit MAX_AVATAR_BYTES. */
-async function encodeAvatar(file: File): Promise<{ bytes: Uint8Array; mime: string }> {
+/** A square part of an image, in the image's own pixels. */
+export interface CropArea {
+  x: number
+  y: number
+  size: number
+}
+
+/** Crops to a square (the given area, or the middle) and shrinks to fit MAX_AVATAR_BYTES. */
+async function encodeAvatar(file: Blob, crop?: CropArea): Promise<{ bytes: Uint8Array; mime: string }> {
   let bmp: ImageBitmap
   try {
     bmp = await createImageBitmap(file)
   } catch {
     throw new Error("That image couldn't be opened")
   }
-  const side = Math.min(bmp.width, bmp.height)
+  let side = Math.min(bmp.width, bmp.height)
+  let x = (bmp.width - side) / 2
+  let y = (bmp.height - side) / 2
+  if (crop && [crop.x, crop.y, crop.size].every(Number.isFinite) && crop.size >= 1) {
+    side = Math.min(crop.size, bmp.width, bmp.height)
+    x = Math.min(Math.max(0, crop.x), bmp.width - side)
+    y = Math.min(Math.max(0, crop.y), bmp.height - side)
+  }
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = 256
-  canvas.getContext('2d')!.drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, 256, 256)
+  canvas.getContext('2d')!.drawImage(bmp, x, y, side, side, 0, 0, 256, 256)
   bmp.close()
   for (const q of [0.85, 0.7, 0.5]) {
     let blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/webp', q))
@@ -2374,10 +2692,13 @@ async function encodeAvatar(file: File): Promise<{ bytes: Uint8Array; mime: stri
   throw new Error("That image couldn't be made small enough")
 }
 
-/** Sets (or with null removes) my profile picture and sends it to all my contacts, encrypted. */
-export async function setAvatar(file: File | null) {
+/**
+ * Sets (or with null removes) my profile picture and sends it to all my contacts, encrypted.
+ * `crop`: the square to use, in the image's pixels (default: the middle).
+ */
+export async function setAvatar(file: Blob | null, crop?: CropArea) {
   const s = requireSession()
-  const img = file ? await encodeAvatar(file) : null
+  const img = file ? await encodeAvatar(file, crop) : null
   if (!live(s)) return
   s.profile = { avatar: img ? b64(img.bytes) : null, mime: img?.mime ?? '', at: Date.now(), sentAt: 0 }
   showMyAvatar(s)
@@ -2421,4 +2742,418 @@ export async function removeMember(groupId: string, member: string) {
 
 export async function setAdmin(groupId: string, member: string, on: boolean) {
   await groupOp({ t: 'gadmin', id: groupId, member, on })
+}
+
+// ---------------------------------------------------------------------------
+// Public API: retry, forward, star, media
+// ---------------------------------------------------------------------------
+
+/** The payload of one of my own messages, rebuilt from what's stored here. */
+async function contentOf(shown: ChatMessage, fwd: boolean): Promise<{ body: PayloadBody; attachment?: Uint8Array; local: Partial<ChatMessage> }> {
+  // A plain copy: what the UI passes in is reactive, and reactive objects can't be stored.
+  const msg = JSON.parse(JSON.stringify(toRaw(shown))) as ChatMessage
+  const reply = fwd ? undefined : msg.reply
+  if (msg.kind === 'text' && msg.doc) {
+    return { body: { t: 'text', doc: msg.doc, reply, fwd: fwd || undefined }, local: { kind: 'text', doc: msg.doc, reply, forwarded: fwd || undefined } }
+  }
+  if (msg.kind === 'file' && msg.file) {
+    const bytes = await get<Uint8Array>(K.file(msg.id), db)
+    if (!(bytes instanceof Uint8Array)) throw new Error("That file isn't on this device")
+    const f = msg.file
+    return {
+      body: { t: 'file', name: f.name, mime: f.mime, size: bytes.length, reply, fwd: fwd || undefined },
+      attachment: bytes,
+      local: { kind: 'file', file: { ...f, size: bytes.length }, reply, forwarded: fwd || undefined },
+    }
+  }
+  throw new Error("This message can't be sent")
+}
+
+/** Sends one of my failed messages again (same message, so nobody gets it twice). */
+export async function retryMessage(msg: ChatMessage) {
+  const s = requireSession()
+  if (msg.from !== s.me || msg.status !== 'failed') return
+  const envId = msg.id.slice(s.me.length + 1)
+  const { pc, to } = await targetsOf(s, msg.conv)
+  const { body, attachment } = await contentOf(msg, !!msg.forwarded)
+  if (msg.forwarded && (body.t === 'text' || body.t === 'file')) body.fwd = true
+  if (msg.reply && (body.t === 'text' || body.t === 'file')) body.reply = msg.reply
+  const env = seal(s.identity, s.me, recipientKeys(s, to), encodePayload({ conv: pc, body }, attachment), envId, msg.ts)
+  if (!live(s)) return
+  await queueOutgoing(s, { env, conv: msg.conv, mid: msg.id })
+  await updateMessageStatus(s, msg.conv, msg.id, 'sending')
+  sendQueued(s, envId)
+}
+
+/** Forwards a message (text or file) to other conversations. It's marked "Forwarded" there. */
+export async function forwardMessage(msg: ChatMessage, targets: ConvId[]) {
+  requireSession()
+  if (msg.kind === 'system') throw new Error("This message can't be forwarded")
+  const convs = [...new Set(targets)].filter((c) => validConvId(c))
+  if (!convs.length) throw new Error('Pick a chat to forward to')
+  const { body, attachment, local } = await contentOf(msg, true)
+  const failed: string[] = []
+  for (const conv of convs) {
+    try {
+      await sendContent(conv, (pc) => ({ conv: pc, body }), local, attachment)
+    } catch (e) {
+      failed.push(`${state.conversations.find((c) => c.id === conv)?.title ?? 'a chat'}: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+  if (failed.length) throw new Error(`Couldn't forward to ${failed.join('; ')}`)
+}
+
+export function isStarred(msg: ChatMessage): boolean {
+  return !!state.starred[starKey(msg.conv, msg.id)]
+}
+
+/** Stars or unstars a message (synced to my other devices; nobody else sees it). */
+export function toggleStar(msg: ChatMessage) {
+  const s = requireSession()
+  if (msg.kind === 'system') return
+  const key = starKey(msg.conv, msg.id)
+  const on = !s.stars[key]?.on
+  s.stars[key] = { on, at: Math.max(Date.now(), (s.stars[key]?.at ?? 0) + 1) }
+  const keys = Object.keys(s.stars)
+  if (keys.length > MAX_STARS) {
+    // Forget the oldest unstar markers first, then the oldest stars.
+    const order = keys.sort((a, b) => Number(s.stars[a]!.on) - Number(s.stars[b]!.on) || s.stars[a]!.at - s.stars[b]!.at)
+    for (const k of order.slice(0, keys.length - MAX_STARS)) delete s.stars[k]
+  }
+  showStars(s)
+  scheduleFlush(s)
+  scheduleVaultPush(s)
+}
+
+/** My starred messages that are on this device, newest first. Open one with open(hit.conv, hit.msg.id). */
+export async function starredMessages(): Promise<SearchHit[]> {
+  const s = requireSession()
+  const byConv = new Map<ConvId, Set<string>>()
+  for (const k of Object.keys(state.starred)) {
+    const sp = k.indexOf(' ')
+    const conv = k.slice(0, sp) as ConvId
+    if (!byConv.has(conv)) byConv.set(conv, new Set())
+    byConv.get(conv)!.add(k.slice(sp + 1))
+  }
+  const hits: SearchHit[] = []
+  for (const c of state.conversations) {
+    const ids = byConv.get(c.id)
+    if (!ids) continue
+    const list = await loadConv(s, c.id)
+    if (session !== s) return []
+    for (const m of list) if (ids.has(m.id)) hits.push({ conv: c.id, title: c.title, msg: m })
+  }
+  return hits.sort((a, b) => b.msg.ts - a.msg.ts)
+}
+
+/** File and image messages of a conversation, newest first (for the media gallery). */
+export async function mediaOf(conv: ConvId): Promise<ChatMessage[]> {
+  const s = requireSession()
+  const list = await loadConv(s, conv)
+  return list.filter((m) => m.kind === 'file' && m.file).reverse()
+}
+
+/** Images are shown inline; everything else is a download. */
+export function isImage(msg: ChatMessage): boolean {
+  return msg.kind === 'file' && !!msg.file && SAFE_MIME.has(msg.file.mime)
+}
+
+// ---------------------------------------------------------------------------
+// Public API: devices, account deletion
+// ---------------------------------------------------------------------------
+
+/** A readable name for this device, like "Firefox on Linux" or "Desktop app on Windows". */
+export function deviceName(): string {
+  const ua = typeof navigator === 'undefined' ? '' : navigator.userAgent
+  const os = /iPhone|iPad|iPod/.test(ua)
+    ? 'iOS'
+    : /Android/.test(ua)
+      ? 'Android'
+      : /Windows/.test(ua)
+        ? 'Windows'
+        : /Mac OS X|Macintosh/.test(ua)
+          ? 'macOS'
+          : /CrOS/.test(ua)
+            ? 'ChromeOS'
+            : /Linux/.test(ua)
+              ? 'Linux'
+              : ''
+  const app = isDesktop
+    ? 'Desktop app'
+    : /Edg\//.test(ua)
+      ? 'Edge'
+      : /OPR\//.test(ua)
+        ? 'Opera'
+        : /Firefox\//.test(ua)
+          ? 'Firefox'
+          : /Chrome\//.test(ua)
+            ? 'Chrome'
+            : /Safari\//.test(ua)
+              ? 'Safari'
+              : 'Browser'
+  return os ? `${app} on ${os}` : app
+}
+
+/** My signed-in devices, most recently used first. */
+export async function listDevices(): Promise<Device[]> {
+  const s = requireSession()
+  const res = await request(s, { type: 'sessions' })
+  if (res.type !== 'sessions' || !Array.isArray(res.sessions)) throw new Error('Unexpected reply from the server')
+  const list = res.sessions.filter((d) => d && isStr(d.id) && typeof d.created === 'number' && typeof d.lastUsed === 'number')
+  for (const d of list as (Device & { deviceId?: unknown })[]) {
+    if (isStr(d.deviceId) && /^[0-9a-f]{32}$/.test(d.deviceId)) s.deviceIds.set(d.id, d.deviceId)
+  }
+  return list
+    .map((d) => ({
+      id: d.id,
+      name: cleanLabel(isStr(d.name) ? d.name : '', 64),
+      created: d.created,
+      lastUsed: d.lastUsed,
+      current: d.current === true,
+      online: d.online === true,
+    }))
+}
+
+/** Signs out another of my devices. It deletes its local data the next time it connects (right away if online). */
+export async function signOutDevice(id: string) {
+  const s = requireSession()
+  const deviceId = s.deviceIds.get(id)
+  if (deviceId && deviceId === s.saved.deviceId) throw new Error('Use Sign out to sign out this device')
+  // Devices from older versions have no id of their own: they're signed out but keep their data.
+  const proof = deviceId ? signNotice(s.identity, revokeNotice(s.me, deviceId)) : undefined
+  await request(s, { type: 'revoke_session', id, proof })
+}
+
+/**
+ * Deletes my account on the server (keys, friends, stored messages, settings) and everything on
+ * this device. My other devices are signed out. Can't be undone.
+ */
+export async function deleteAccount(password: string) {
+  const s = requireSession()
+  if (!password) throw new Error('Enter your password')
+  const pre = await request(s, { type: 'prelogin' })
+  if (pre.type !== 'prelogin' || !isStr(pre.salt)) throw new Error('Unexpected reply from the server')
+  const keys = await deriveFromPassword(password, unb64(pre.salt))
+  // Leave my groups first, so the others see it (and get a new admin if I was the only one).
+  for (const g of Object.values(state.groups)) {
+    try {
+      const others = g.members.filter((id) => id !== s.me && s.pins[id])
+      if (others.length) sendEnvelope(s, others, { conv: { t: 'g', id: g.id }, body: { t: 'leave', id: g.id } })
+    } catch {
+      /* best effort */
+    }
+  }
+  await request(s, { type: 'delete_account', authKey: b64(keys.authKey), proof: signNotice(s.identity, deleteNotice(s.me)) })
+  // The server closes the connection next: stop first so this session doesn't try to reconnect.
+  session = null
+  stop(s)
+  await s.queue
+  await clear(db)
+  forgetUsername()
+  resetState()
+}
+
+// ---------------------------------------------------------------------------
+// Public API: backup
+// ---------------------------------------------------------------------------
+//
+// File: "E2EECHAT-BACKUP2", a random 16-byte backup id, then records, each
+// [4-byte length][24-byte nonce][ciphertext]. Each record is encrypted with a key derived from my
+// private key and bound (AAD) to my user ID, the backup id and its position, so only my account
+// can open it and records can't be swapped (also not between backups), dropped or cut off
+// unnoticed (the last record says how many came before it).
+// Record plaintext: [4-byte header length][header JSON][bytes] (bytes only for files).
+// Big chats are split over several records.
+
+const BACKUP_MAGIC = 'E2EECHAT-BACKUP2'
+/** A chat's messages are split into records of about this many bytes of JSON. */
+const BACKUP_CHUNK = 1024 * 1024
+/** Largest record header accepted on import (one message is far smaller). */
+const MAX_BACKUP_HEADER = 32 * 1024 * 1024
+const BACKUP_CONTEXT = 'e2ee-chat/backup/v1'
+
+type BackupRecord =
+  | { t: 'head'; user: string; created: number }
+  | { t: 'conv'; conv: ConvId; messages: ChatMessage[] }
+  | { t: 'file'; mid: string }
+  | { t: 'end'; n: number }
+
+function backupAad(user: string, backupId: Uint8Array, i: number): Uint8Array {
+  return new TextEncoder().encode(`${BACKUP_CONTEXT}\n${user}\n${b64(backupId)}\n${i}`)
+}
+
+/**
+ * Everything on this device (all chats with their files) as one encrypted file. Only this
+ * account can open it again with importBackup. Returns the file and a suggested name.
+ */
+export async function exportBackup(): Promise<{ blob: Blob; name: string }> {
+  const s = requireSession()
+  const { backupKey, sealRecord } = await import('./crypto')
+  const key = backupKey(s.identity, BACKUP_CONTEXT)
+  const backupId = crypto.getRandomValues(new Uint8Array(16))
+  const parts: BlobPart[] = [new TextEncoder().encode(BACKUP_MAGIC) as Uint8Array<ArrayBuffer>, backupId]
+  let i = 0
+  const put = (rec: BackupRecord, bytes?: Uint8Array) => {
+    const sealed = sealRecord(key, encodePayload(rec as unknown as PayloadHeader, bytes), backupAad(s.me, backupId, i++))
+    const len = new Uint8Array(4)
+    new DataView(len.buffer).setUint32(0, sealed.length)
+    parts.push(len, sealed as Uint8Array<ArrayBuffer>)
+  }
+  put({ t: 'head', user: s.me, created: Date.now() })
+  await serial(s, () => flush(s))
+  const convKeys = (await idbKeys(db)).filter((k): k is string => isStr(k) && k.startsWith('conv:'))
+  for (const ck of convKeys) {
+    const conv = ck.slice(5) as ConvId
+    if (!validConvId(conv)) continue
+    const list = await loadConv(s, conv)
+    if (session !== s) throw new Error('Signed out')
+    if (!list.length) continue
+    let chunk: ChatMessage[] = []
+    let size = 0
+    for (const m of list) {
+      const n = JSON.stringify(m).length
+      if (chunk.length && size + n > BACKUP_CHUNK) {
+        put({ t: 'conv', conv, messages: chunk })
+        chunk = []
+        size = 0
+      }
+      chunk.push(m)
+      size += n
+    }
+    if (chunk.length) put({ t: 'conv', conv, messages: chunk })
+    for (const m of list) {
+      if (m.kind !== 'file') continue
+      const bytes = await get<Uint8Array>(K.file(m.id), db)
+      if (bytes instanceof Uint8Array) put({ t: 'file', mid: m.id }, bytes)
+    }
+  }
+  put({ t: 'end', n: i })
+  const day = new Date().toISOString().slice(0, 10)
+  return { blob: new Blob(parts, { type: 'application/octet-stream' }), name: `e2ee-chat-${s.saved.username}-${day}.backup` }
+}
+
+/** Checks a message from a backup (made by this account, but checked like anything else read from a file). */
+function backupMessage(conv: ConvId, raw: unknown): ChatMessage | null {
+  if (!raw || typeof raw !== 'object') return null
+  const m = raw as ChatMessage
+  if (!isStr(m.id) || m.id.length > 120 || m.conv !== conv || !isStr(m.from) || (m.from && !validId(m.from))) return null
+  if (typeof m.ts !== 'number' || !Number.isFinite(m.ts)) return null
+  const out: ChatMessage = { id: m.id, conv, from: m.from, ts: m.ts, kind: m.kind, status: m.status === 'received' ? 'received' : 'sent' }
+  if (m.status === 'sending' || m.status === 'failed') out.status = 'failed'
+  if (m.kind === 'text') {
+    if (!m.doc || typeof m.doc !== 'object' || m.doc.type !== 'doc' || !docWithinLimits(m.doc)) return null
+    out.doc = m.doc
+    if (typeof m.edited === 'number') out.edited = m.edited
+  } else if (m.kind === 'file') {
+    const f = m.file
+    if (!f || !isStr(f.name) || !isStr(f.mime) || typeof f.size !== 'number') return null
+    out.file = { name: cleanLabel(f.name, 200) || 'file', mime: f.mime.slice(0, 100), size: f.size }
+  } else if (m.kind === 'system') {
+    if (!isStr(m.text)) return null
+    out.text = m.text.slice(0, 500)
+  } else {
+    return null
+  }
+  if (m.reply && isStr(m.reply.id) && isStr(m.reply.from) && isStr(m.reply.preview)) {
+    out.reply = { id: m.reply.id.slice(0, 120), from: m.reply.from, preview: cleanLabel(m.reply.preview, 120) }
+  }
+  if (m.reactions && typeof m.reactions === 'object') {
+    const r = dict<string[]>()
+    for (const [e, users] of Object.entries(m.reactions).slice(0, 20)) {
+      if (isStr(e) && e.length <= 16 && isIdList(users)) r[e] = users
+    }
+    if (Object.keys(r).length) out.reactions = r
+  }
+  if (m.forwarded === true) out.forwarded = true
+  return out
+}
+
+/** Adds the chats from a backup made by this account. Messages already here are kept as they are. */
+export async function importBackup(file: Blob): Promise<ImportResult> {
+  const s = requireSession()
+  const { backupKey, openRecord } = await import('./crypto')
+  const key = backupKey(s.identity, BACKUP_CONTEXT)
+  const data = new Uint8Array(await file.arrayBuffer())
+  const magic = new TextEncoder().encode(BACKUP_MAGIC)
+  if (data.length < magic.length + 16 || new TextDecoder().decode(data.subarray(0, magic.length)) !== BACKUP_MAGIC) {
+    throw new Error("That isn't an E2EE Chat backup")
+  }
+  const backupId = data.slice(magic.length, magic.length + 16)
+  const records: { rec: BackupRecord; bytes: Uint8Array }[] = []
+  let off = magic.length + 16
+  let ended = false
+  for (let i = 0; off < data.length; i++) {
+    if (ended || off + 4 > data.length) throw new Error('The backup is damaged')
+    const len = new DataView(data.buffer, data.byteOffset + off, 4).getUint32(0)
+    off += 4
+    if (off + len > data.length) throw new Error('The backup is incomplete')
+    let plain: Uint8Array
+    try {
+      plain = openRecord(key, data.subarray(off, off + len), backupAad(s.me, backupId, i))
+    } catch {
+      throw new Error(i === 0 ? 'This backup belongs to another account' : 'The backup is damaged')
+    }
+    off += len
+    let header: unknown
+    let bytes: Uint8Array
+    try {
+      const hlen = new DataView(plain.buffer, plain.byteOffset, plain.byteLength).getUint32(0)
+      if (hlen > plain.length - 4 || hlen > MAX_BACKUP_HEADER) throw new Error('bad record')
+      header = JSON.parse(new TextDecoder().decode(plain.subarray(4, 4 + hlen)))
+      bytes = plain.slice(4 + hlen) // own buffer: a view would store the whole record
+    } catch {
+      throw new Error('The backup is damaged')
+    }
+    const rec = header as BackupRecord
+    if (i === 0 && (rec?.t !== 'head' || rec.user !== s.me)) throw new Error('This backup belongs to another account')
+    if (rec?.t === 'end') {
+      if (rec.n !== i) throw new Error('The backup is damaged')
+      ended = true
+    }
+    records.push({ rec, bytes })
+  }
+  if (!ended) throw new Error('The backup is incomplete')
+
+  const result: ImportResult = { conversations: 0, messages: 0, files: 0 }
+  await serial(s, async () => {
+    const known = new Map<string, ConvId>()
+    const touched = new Set<ConvId>()
+    for (const { rec, bytes } of records) {
+      if (!live(s)) return
+      if (rec.t === 'conv' && validConvId(rec.conv) && Array.isArray(rec.messages)) {
+        const list = await loadConv(s, rec.conv)
+        const have = new Set(list.map((m) => m.id))
+        let added = 0
+        for (const raw of rec.messages) {
+          const m = backupMessage(rec.conv, raw)
+          if (m && m.kind === 'file') known.set(m.id, rec.conv)
+          if (!m || have.has(m.id)) continue
+          have.add(m.id)
+          list.push(m)
+          added++
+        }
+        if (!added) continue
+        list.sort((a, b) => a.ts - b.ts)
+        s.dirtyConvs.add(rec.conv)
+        const meta = s.meta[rec.conv] ?? { unread: 0, lastTs: 0, preview: '' }
+        const last = list[list.length - 1]!
+        if (last.ts >= meta.lastTs) {
+          meta.lastTs = last.ts
+          meta.preview = previewLine(s, last)
+        }
+        s.meta[rec.conv] = meta
+        touched.add(rec.conv)
+        result.messages += added
+      } else if (rec.t === 'file' && isStr(rec.mid) && known.has(rec.mid) && bytes.length <= MAX_FILE_BYTES) {
+        if (await get(K.file(rec.mid), db)) continue
+        await set(K.file(rec.mid), bytes, db)
+        result.files++
+      }
+    }
+    result.conversations = touched.size
+    await flush(s)
+  })
+  refreshConversations()
+  if (state.active) await openConv(state.active)
+  return result
 }

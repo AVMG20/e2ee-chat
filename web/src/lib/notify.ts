@@ -127,7 +127,7 @@ export function startNotifications(): () => void {
     const watching = !document.hidden && document.hasFocus() && view.value === 'chats' && chat.state.active === m.conv
     if (watching) return
     const conv = chat.state.conversations.find((c) => c.id === m.conv)
-    if (conv?.muted) return
+    if (!chat.shouldNotify(m)) return
     if (soundEnabled.value) blip()
     if (!notifyEnabled.value || !notifySupported) return
     const sender = chat.displayName(m.from)

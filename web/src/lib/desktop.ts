@@ -53,3 +53,34 @@ export async function focusWindow(): Promise<void> {
     /* ignore */
   }
 }
+
+export interface AvailableUpdate {
+  version: string
+  notes: string
+  /** Downloads and installs the update, then restarts the app. */
+  install: () => Promise<void>
+}
+
+/**
+ * Asks GitHub whether a newer desktop app is out (the download is checked against the signing key
+ * built into the app). Null on the web, when up to date, or when the check fails.
+ */
+export async function checkForUpdate(): Promise<AvailableUpdate | null> {
+  if (!isDesktop) return null
+  try {
+    const { check } = await import('@tauri-apps/plugin-updater')
+    const update = await check()
+    if (!update) return null
+    return {
+      version: update.version,
+      notes: update.body ?? '',
+      install: async () => {
+        await update.downloadAndInstall()
+        const { relaunch } = await import('@tauri-apps/plugin-process')
+        await relaunch()
+      },
+    }
+  } catch {
+    return null
+  }
+}

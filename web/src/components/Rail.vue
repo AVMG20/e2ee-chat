@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Download, MessageSquare, Moon, Settings, Sun, Users } from 'lucide-vue-next'
+import { Download, MessageSquare, Moon, Settings, Star, Sun, Users } from 'lucide-vue-next'
 import RailButton from '@/components/shell/RailButton.vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { chat } from '@/lib/chat'
 import { openFriends, showChats, view } from '@/lib/nav'
 import { isDark, toggleTheme } from '@/lib/theme'
-import { accountOpen } from '@/lib/ui'
+import { accountOpen, starredOpen } from '@/lib/ui'
 
 const incoming = computed(() => chat.state.requests.incoming.length)
 const unread = computed(() => chat.state.conversations.reduce((n, c) => n + c.unread, 0))
@@ -30,6 +30,8 @@ const unread = computed(() => chat.state.conversations.reduce((n, c) => n + c.un
           <span v-if="incoming" class="unread absolute -right-1 -bottom-1 shadow-[0_0_0_3px_var(--rail)] !bg-destructive">{{ incoming }}</span>
         </template>
       </RailButton>
+
+      <RailButton label="Starred messages" @click="starredOpen = true"><Star class="size-5" /></RailButton>
 
       <div class="flex-1" />
 

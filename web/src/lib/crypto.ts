@@ -328,3 +328,41 @@ export function openVault(id: Identity, sealed: string): unknown {
   const plain = xchacha20poly1305(vaultKey(id), raw.subarray(0, 24), utf8(VAULT_CONTEXT)).decrypt(raw.subarray(24))
   return JSON.parse(new TextDecoder().decode(plain))
 }
+
+// ---------------------------------------------------------------------------
+// Backups: records encrypted with a key only this account has
+// ---------------------------------------------------------------------------
+
+export function backupKey(id: Identity, context: string): Uint8Array {
+  return hkdf(sha256, id.encSk, utf8(context), utf8('key'), 32)
+}
+
+export function sealRecord(key: Uint8Array, plain: Uint8Array, aad: Uint8Array): Uint8Array {
+  const nonce = randomBytes(24)
+  return concat(nonce, xchacha20poly1305(key, nonce, aad).encrypt(plain))
+}
+
+export function openRecord(key: Uint8Array, sealed: Uint8Array, aad: Uint8Array): Uint8Array {
+  if (sealed.length < 24 + 16) throw new Error('bad record')
+  return xchacha20poly1305(key, sealed.subarray(0, 24), aad).decrypt(sealed.subarray(24))
+}
+
+// ---------------------------------------------------------------------------
+// Notices: short statements signed with my key (e.g. "sign out device X"), passed on by
+// the server, which can't forge them.
+// ---------------------------------------------------------------------------
+
+const NOTICE_CONTEXT = 'e2ee-chat/notice/v1\n'
+
+export function signNotice(id: Identity, text: string): string {
+  return b64(ed25519.sign(utf8(NOTICE_CONTEXT + text), id.signSk))
+}
+
+export function verifyNotice(signPk: Uint8Array, text: string, sig: unknown): boolean {
+  if (typeof sig !== 'string' || sig.length > 200) return false
+  try {
+    return ed25519.verify(unb64(sig), utf8(NOTICE_CONTEXT + text), signPk, { zip215: false })
+  } catch {
+    return false
+  }
+}

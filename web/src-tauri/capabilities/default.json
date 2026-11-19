@@ -16,6 +16,8 @@
     "notification:allow-request-permission",
     "notification:allow-notify",
     "notification:allow-register-listener",
-    "notification:allow-remove-listener"
+    "notification:allow-remove-listener",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

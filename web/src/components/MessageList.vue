@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowDown, Loader2 } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, Loader2 } from 'lucide-vue-next'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import ForwardDialog from '@/components/ForwardDialog.vue'
 import ImageViewer from '@/components/messages/ImageViewer.vue'
 import MessageItem from '@/components/MessageItem.vue'
 import MessageSheet from '@/components/messages/MessageSheet.vue'
@@ -29,7 +30,33 @@ function onScroll() {
   if (!el) return
   stick = el.scrollHeight - el.scrollTop - el.clientHeight < 120
   atBottom.value = stick
+  checkUnread()
   if (el.scrollTop < 300) void loadMore()
+}
+
+// ---------- "New messages" pill ----------
+const unreadAbove = ref(false)
+let unreadSeen = false
+
+/** Shows the pill while the New divider is above the visible area; hides for good once it was on screen. */
+function checkUnread() {
+  const sc = scroller.value
+  const el = sc?.querySelector<HTMLElement>('[data-unread-divider]')
+  if (!sc || !el || unreadSeen) {
+    unreadAbove.value = false
+    return
+  }
+  const r = el.getBoundingClientRect()
+  const top = sc.getBoundingClientRect()
+  unreadAbove.value = r.bottom < top.top
+  if (!unreadAbove.value && r.top < top.bottom) unreadSeen = true
+}
+
+function goToUnread() {
+  const el = scroller.value?.querySelector<HTMLElement>('[data-unread-divider]')
+  if (!el) return
+  stick = false
+  el.scrollIntoView({ block: 'start', behavior: 'smooth' })
 }
 
 // ---------- paging ----------
@@ -127,6 +154,8 @@ watch(
   async () => {
     stick = true
     atBottom.value = true
+    unreadSeen = false
+    unreadAbove.value = false
     animate.value = false
     pendingUnread = true
     clearTimeout(unreadTimer)
@@ -136,6 +165,7 @@ watch(
     await nextTick()
     toBottom()
     settleUnread()
+    checkUnread()
   },
   { immediate: true },
 )
@@ -148,6 +178,7 @@ watch(
     await nextTick()
     if (stick) toBottom()
     settleUnread()
+    checkUnread()
   },
   { flush: 'post' },
 )
@@ -238,7 +269,7 @@ watch(() => chat.state.active, () => {
             <div v-if="r.date" class="mx-4 mt-4 mb-1 flex items-center gap-2 text-[11px] font-semibold text-muted-foreground">
               <span class="h-px flex-1 bg-line" />{{ formatDate(r.m.ts) }}<span class="h-px flex-1 bg-line" />
             </div>
-            <div v-if="r.unread" class="mx-3 mt-3 flex items-center" role="separator" aria-label="New messages">
+            <div v-if="r.unread" data-unread-divider class="mx-3 mt-3 flex items-center" role="separator" aria-label="New messages">
               <span class="h-px flex-1 bg-destructive/70" />
               <span class="rounded-sm bg-destructive px-1.5 py-px text-[10px] leading-4 font-bold text-white uppercase">New</span>
             </div>
@@ -261,7 +292,21 @@ watch(() => chat.state.active, () => {
       </button>
     </Transition>
 
+    <Transition
+      enter-active-class="transition duration-150" enter-from-class="-translate-y-2 opacity-0"
+      leave-active-class="transition duration-150" leave-to-class="-translate-y-2 opacity-0"
+    >
+      <button
+        v-if="unreadAbove"
+        class="btn btn-primary btn-sm absolute top-3 left-1/2 z-10 -translate-x-1/2 rounded-full shadow-[var(--shadow-md)]"
+        @click="goToUnread"
+      >
+        <ArrowUp />New messages
+      </button>
+    </Transition>
+
     <MessageSheet />
+    <ForwardDialog />
     <ImageViewer />
     <ConfirmDialog
       v-model:open="confirmOpen" title="Delete message?" confirm-label="Delete"
