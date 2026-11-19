@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { Camera, Download, KeyRound, Laptop, Loader2, LogOut, Trash2, Upload } from 'lucide-vue-next'
+import { computed, ref, watch } from 'vue'
+import { Camera, Download, KeyRound, RefreshCw, Laptop, Loader2, LogOut, Trash2, Upload } from 'lucide-vue-next'
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
@@ -9,6 +9,7 @@ import Toggle from '@/components/shell/Toggle.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import AvatarCropDialog from '@/components/AvatarCropDialog.vue'
 import DevicesDialog from '@/components/DevicesDialog.vue'
+import RotateKeysDialog from '@/components/RotateKeysDialog.vue'
 import DeleteAccountDialog from '@/components/DeleteAccountDialog.vue'
 import { chat } from '@/lib/chat'
 import { notifyDenied, notifyEnabled, notifySupported, setNotify, setSound, soundEnabled } from '@/lib/notify'
@@ -22,12 +23,26 @@ const rawId = computed(() => chat.state.account?.id ?? '')
 const id = computed(() => chat.formatId(rawId.value))
 
 const picker = ref<HTMLInputElement | null>(null)
+
+// Display name: saved when the field loses focus or Enter is pressed.
+const nameInput = ref('')
+watch(open, (o) => {
+  if (o) nameInput.value = chat.state.account?.displayName === chat.state.account?.username ? '' : chat.state.account?.displayName ?? ''
+}, { immediate: true })
+function saveName() {
+  try {
+    chat.setDisplayName(nameInput.value)
+  } catch (e) {
+    toast.error(errMsg(e))
+  }
+}
 const avatarBusy = ref(false)
 
 const cropOpen = ref(false)
 const cropFile = ref<File | null>(null)
 const devicesOpen = ref(false)
 const deleteOpen = ref(false)
+const rotateOpen = ref(false)
 const backupBusy = ref<'' | 'export' | 'import'>('')
 const backupPicker = ref<HTMLInputElement | null>(null)
 
@@ -46,7 +61,13 @@ function onPick(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
   input.value = ''
-  if (file) {
+  if (!file) return
+  if (file.type === 'image/gif') {
+    avatarBusy.value = true
+    chat.setAvatar(file).catch((e) => toast.error(errMsg(e))).finally(() => (avatarBusy.value = false))
+    return
+  }
+  {
     cropFile.value = file
     cropOpen.value = true
   }
@@ -115,7 +136,7 @@ async function toggleNotify(on: boolean) {
           class="group/av relative shrink-0 rounded-full outline-none focus-visible:shadow-[var(--glow)]"
           title="Change picture" aria-label="Change picture" :disabled="avatarBusy" @click="picker?.click()"
         >
-          <UserAvatar :name="chat.state.account?.username ?? '?'" :id="chat.state.account?.id" :src="chat.state.account?.avatar" :size="48" />
+          <UserAvatar :name="chat.state.account?.displayName ?? '?'" :id="chat.state.account?.id" :src="chat.state.account?.avatar" :size="48" />
           <span
             class="absolute inset-0 flex items-center justify-center rounded-full bg-black/55 text-white transition-opacity"
             :class="avatarBusy ? 'opacity-100' : 'opacity-0 group-hover/av:opacity-100 group-focus-visible/av:opacity-100'"
@@ -123,9 +144,10 @@ async function toggleNotify(on: boolean) {
             <Loader2 v-if="avatarBusy" class="size-5 animate-spin" /><Camera v-else class="size-5" />
           </span>
         </button>
-        <input ref="picker" type="file" accept="image/*" class="hidden" @change="onPick">
+        <input ref="picker" type="file" accept="image/*,image/gif" class="hidden" @change="onPick">
         <div class="min-w-0 flex-1">
-          <div class="truncate text-base font-semibold">{{ chat.state.account?.username }}</div>
+          <div class="truncate text-base font-semibold">{{ chat.state.account?.displayName }}</div>
+          <div v-if="chat.state.account?.displayName !== chat.state.account?.username" class="truncate text-xs text-muted-foreground">@{{ chat.state.account?.username }}</div>
           <div class="font-mono text-sm tracking-[0.1em] text-muted-foreground select-all">{{ id }}</div>
           <div class="mt-1 flex gap-3 text-xs">
             <button class="text-[var(--link)] hover:underline disabled:opacity-50" :disabled="avatarBusy" @click="picker?.click()">Change picture</button>
@@ -133,6 +155,24 @@ async function toggleNotify(on: boolean) {
           </div>
         </div>
         <CopyIdButton :id="rawId" label="Copy ID" />
+      </div>
+
+      <div class="space-y-2">
+        <label class="eyebrow block" for="display-name">Display name</label>
+        <input
+          id="display-name" v-model="nameInput" class="field" maxlength="32" autocomplete="nickname"
+          :placeholder="chat.state.account?.username" @blur="saveName" @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
+        >
+        <p class="text-xs text-muted-foreground">Shown to your friends instead of your username. You still sign in with @{{ chat.state.account?.username }}.</p>
+      </div>
+
+      <div class="space-y-2">
+        <div class="eyebrow">Your security code</div>
+        <div class="well rounded-md p-3">
+          <p class="grid grid-cols-4 gap-x-2 gap-y-1 font-mono text-[13px] tracking-wide"><span v-for="(g, i) in (chat.state.account?.fingerprint ?? '').split(' ')" :key="i">{{ g }}</span></p>
+        </div>
+        <p class="text-xs text-muted-foreground">Friends can compare this with the code they see for you.</p>
+        <button class="btn btn-soft btn-sm" aria-label="Change security keys" title="Change security keys" @click="rotateOpen = true"><RefreshCw />Change security keys</button>
       </div>
 
       <div class="space-y-3.5">
@@ -190,5 +230,6 @@ async function toggleNotify(on: boolean) {
 
   <AvatarCropDialog v-model:open="cropOpen" :file="cropFile" />
   <DevicesDialog v-model:open="devicesOpen" />
+  <RotateKeysDialog v-model:open="rotateOpen" />
   <DeleteAccountDialog v-model:open="deleteOpen" @deleted="open = false" />
 </template>

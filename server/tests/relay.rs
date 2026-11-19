@@ -513,3 +513,39 @@ async fn missing_assets_are_not_found() {
     // Every other path is the app.
     assert!(get("/some/page").await.contains("200"));
 }
+
+#[tokio::test]
+async fn keys_can_be_changed() {
+    let (url, _dir) = start().await;
+    let mut a = register(&url, "alice", 1).await.unwrap();
+    let mut b = register(&url, "bob", 2).await.unwrap();
+    befriend(&mut a, &mut b).await;
+    let mut laptop = resume(&url, &a.token, 0).await;
+
+    send(&mut a.ws, json!({"type": "head", "req": 9})).await;
+    assert!(recv_type(&mut a.ws, "head").await["seq"].as_i64().is_some());
+    let rotate = |req: u64, auth: u8, old: u8| json!({"type": "rotate_keys", "req": req, "authKey": b64(auth, 32),
+        "oldSignPk": b64(old, 32), "signPk": b64(7, 32), "encPk": b64(8, 32), "bundle": "new-locked-keys", "vault": "new-vault"});
+    send(&mut a.ws, rotate(1, 9, 1)).await;
+    assert_eq!(recv_type(&mut a.ws, "error").await["message"], "Password is wrong");
+    // Only from the keys the server has now.
+    send(&mut a.ws, rotate(3, 1, 5)).await;
+    assert_eq!(recv_type(&mut a.ws, "error").await["req"], 3);
+    send(&mut a.ws, rotate(2, 1, 1)).await;
+    assert_eq!(recv_type(&mut a.ws, "ok").await["req"], 2);
+
+    // Other devices are signed out; friends get the new keys.
+    assert_eq!(recv_type(&mut laptop, "error").await["message"], "Your security keys were changed. Sign in again.");
+    loop {
+        let snap = recv_type(&mut b.ws, "friends").await;
+        if snap["friends"][0]["signPk"] == b64(7, 32) {
+            assert_eq!(snap["friends"][0]["encPk"], b64(8, 32));
+            break;
+        }
+    }
+    // Signing in hands out the new locked keys and the re-sealed vault.
+    let (mut ws, _) = connect_async(&url).await.unwrap();
+    send(&mut ws, json!({"type": "login", "username": "alice", "authKey": b64(1, 32)})).await;
+    let w = recv(&mut ws).await;
+    assert_eq!((w["bundle"].as_str(), w["vault"].as_str()), (Some("new-locked-keys"), Some("new-vault")));
+}

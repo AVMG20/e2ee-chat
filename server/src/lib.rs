@@ -60,7 +60,8 @@ const MAX_SESSIONS_PER_USER: usize = 10;
 /// Stored envelope ids are fetched this many at a time when a device catches up.
 const SYNC_PAGE: i64 = 256;
 const MAX_VAULT_BYTES: usize = 2 * 1024 * 1024;
-const MAX_BUNDLE_BYTES: usize = 4096;
+/// Locked keys: the current pair plus up to 20 earlier ones (kept after changing keys).
+const MAX_BUNDLE_BYTES: usize = 16 * 1024;
 const MAX_RECIPIENTS: usize = 256;
 const MAX_PENDING_REQUESTS: i64 = 100;
 /// Signals (typing indicators) are tiny, and limited per session.
@@ -74,7 +75,8 @@ const ID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const MAX_DEVICE_NAME: usize = 64;
 /// Max length of a device's own id and of a signed revoke/delete proof.
 const MAX_DEVICE_ID: usize = 64;
-const MAX_PROOF: usize = 512;
+/// A proof holds a signature by each of the account's key generations (up to 21).
+const MAX_PROOF: usize = 4096;
 /// A deleted account's username can't be registered again for this long.
 const NAME_HOLD_DAYS: i64 = 365;
 /// Sent (with code "revoked") to a device that was signed out from another device.
@@ -211,6 +213,31 @@ enum ClientMsg {
         bundle: String,
     },
     Logout,
+    /// Replaces my public keys and locked key bundle (needs the password). Other devices are
+    /// signed out; friends get the new keys and their apps ask them to accept the change.
+    /// Only applied if my current signing key is still `old_sign_pk` (so two devices changing keys
+    /// at once can't leave keys behind). `vault` is re-sealed with the new keys; a new password is optional.
+    #[serde(rename_all = "camelCase")]
+    RotateKeys {
+        #[serde(default)]
+        req: u64,
+        auth_key: String,
+        old_sign_pk: String,
+        sign_pk: String,
+        enc_pk: String,
+        bundle: String,
+        #[serde(default)]
+        vault: Option<String>,
+        #[serde(default)]
+        new_salt: Option<String>,
+        #[serde(default)]
+        new_auth_key: Option<String>,
+    },
+    /// The newest stored message seq (my own messages signed with keys I replace count up to there).
+    Head {
+        #[serde(default)]
+        req: u64,
+    },
     /// Lists my signed-in devices.
     Sessions {
         #[serde(default)]
@@ -1468,8 +1495,11 @@ async fn handle_client_msg(
                     "UPDATE accounts SET salt = ?1, auth_hash = ?2, bundle = ?3 WHERE id = ?4",
                     params![new_salt, sha256(&new_auth), bundle, my],
                 )?;
-                // A new password signs out every other device.
-                db.execute("DELETE FROM sessions WHERE user_id = ?1 AND token_hash != ?2", params![my, me.token_hash])?;
+                // A new password signs out every other device (signed-out ones keep their row and proof).
+                db.execute(
+                    "DELETE FROM sessions WHERE user_id = ?1 AND token_hash != ?2 AND NOT revoked",
+                    params![my, me.token_hash],
+                )?;
             }
             state.kick_user(my, Some(session_id), "Your password was changed. Sign in again.", None);
             send_text(socket, ok(req)).await?;
@@ -1482,6 +1512,79 @@ async fn handle_client_msg(
                 db.execute("DELETE FROM sessions WHERE token_hash = ?1", [&me.token_hash])?;
             }
             return Ok(false);
+        }
+
+        ClientMsg::Head { req } => {
+            let seq: i64 = {
+                let db = state.db.lock().unwrap();
+                db.query_row("SELECT coalesce(max(id), 0) FROM messages", [], |r| r.get(0))?
+            };
+            send_text(socket, json!({"type": "head", "req": req, "seq": seq}).to_string()).await?;
+        }
+
+        ClientMsg::RotateKeys { req, auth_key, old_sign_pk, sign_pk, enc_pk, bundle, vault, new_salt, new_auth_key } => {
+            if !state.auth_failures.allowed(me.ip) {
+                send_text(socket, err(req, "Too many failed attempts. Try again in a few minutes.")).await?;
+                return Ok(true);
+            }
+            let account = state.account_by_username(&me.username)?;
+            if !account.is_some_and(|a| a.id == my && auth_matches(&a, &auth_key)) {
+                state.auth_failures.hit(me.ip);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                send_text(socket, err(req, "Password is wrong")).await?;
+                return Ok(true);
+            }
+            let new_password = match (new_salt, new_auth_key) {
+                (Some(salt), Some(key)) => match (decode_len(&salt, 16), decode_len(&key, 32)) {
+                    (Some(_), Some(key)) => Some((salt, sha256(&key))),
+                    _ => None,
+                },
+                (None, None) => None,
+                _ => {
+                    send_text(socket, err(req, "Invalid data")).await?;
+                    return Ok(true);
+                }
+            };
+            let bad = decode_len(&sign_pk, 32).is_none()
+                || decode_len(&enc_pk, 32).is_none()
+                || bundle.len() > MAX_BUNDLE_BYTES
+                || vault.as_ref().is_some_and(|v| v.len() > MAX_VAULT_BYTES);
+            if bad {
+                send_text(socket, err(req, "Invalid data")).await?;
+                return Ok(true);
+            }
+            let changed = {
+                let mut db = state.db.lock().unwrap();
+                let tx = db.transaction()?;
+                let n = tx.execute(
+                    "UPDATE accounts SET sign_pk = ?1, enc_pk = ?2, bundle = ?3, vault = coalesce(?4, vault)
+                     WHERE id = ?5 AND sign_pk = ?6",
+                    params![sign_pk, enc_pk, bundle, vault, my, old_sign_pk],
+                )?;
+                if n == 1 {
+                    if let Some((salt, hash)) = &new_password {
+                        tx.execute("UPDATE accounts SET salt = ?1, auth_hash = ?2 WHERE id = ?3", params![salt, hash, my])?;
+                    }
+                    // Other devices hold the old keys: they sign in again to get the new ones.
+                    // Signed-out devices keep their row, so they still learn to delete their data.
+                    tx.execute(
+                        "DELETE FROM sessions WHERE user_id = ?1 AND token_hash != ?2 AND NOT revoked",
+                        params![my, me.token_hash],
+                    )?;
+                }
+                tx.commit()?;
+                n == 1
+            };
+            if !changed {
+                send_text(socket, err(req, "Your keys were just changed on another device. Sign in again.")).await?;
+                return Ok(true);
+            }
+            tracing::info!(user = %my, "keys changed");
+            state.kick_user(my, Some(session_id), "Your security keys were changed. Sign in again.", None);
+            for friend in state.friend_ids(my)? {
+                state.push_friends_snapshot(&friend);
+            }
+            send_text(socket, ok(req)).await?;
         }
 
         ClientMsg::Sessions { req } => {

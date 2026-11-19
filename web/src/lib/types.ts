@@ -5,10 +5,14 @@ export interface Account {
   server: string // e.g. "https://chat.example.com"
   /** Public user ID (8 chars, Crockford base32). Share it so friends can add you. */
   id: string
-  /** Login name, also shown to friends and group members. */
+  /** Login name (fixed). */
   username: string
+  /** Name shown to friends and group members: my display name, or the username. */
+  displayName: string
   /** Object URL of my profile picture, or null. */
   avatar: string | null
+  /** My security code (8 groups of 5 digits): friends compare it with what they see for me. */
+  fingerprint: string
 }
 
 export type ConvId = `dm:${string}` | `g:${string}` // dm:<user id> | g:<group id>
@@ -16,7 +20,10 @@ export type ConvId = `dm:${string}` | `g:${string}` // dm:<user id> | g:<group i
 /** Anyone we know: friends, and members of our groups who aren't friends. Keyed by user ID. */
 export interface Contact {
   id: string
+  /** Name to show: their display name if they set one, else their username. */
   name: string
+  /** Their login name (fixed; show as @username next to a display name). */
+  username: string
   /** Mutual friend: can DM. Non-friends only appear through shared groups. */
   friend: boolean
   /** Only known for friends. */

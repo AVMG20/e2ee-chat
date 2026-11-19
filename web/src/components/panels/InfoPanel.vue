@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { AtSign, Ban, Bell, BellOff, Check, Ellipsis, Loader2, ShieldAlert, ShieldCheck, UserMinus, UserPlus } from 'lucide-vue-next'
+import { ArrowLeft, AtSign, Ban, Bell, BellOff, Check, Ellipsis, Loader2, ShieldAlert, ShieldCheck, UserMinus, UserPlus } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
@@ -10,11 +10,14 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { addMembersGroup, pendingAction } from '@/lib/nav'
-import { MUTE_OPTIONS, muteFor, setPrefs, trustNewKey } from '@/lib/ui'
+import { MUTE_OPTIONS, muteFor, openUser, panelUser, setPrefs, trustNewKey } from '@/lib/ui'
 
 const conv = computed(() => chat.state.conversations.find((c) => c.id === chat.state.active) ?? null)
 const dmId = computed(() => (conv.value?.kind === 'dm' ? conv.value.id.slice(3) : null))
-const contact = computed(() => (dmId.value ? chat.state.contacts[dmId.value] ?? null : null))
+const userId = computed(() => dmId.value ?? panelUser.value)
+const contact = computed(() => (userId.value ? chat.state.contacts[userId.value] ?? null : null))
+const userName = computed(() => (userId.value ? contact.value?.name ?? chat.displayName(userId.value) : ''))
+const showUser = computed(() => !!userId.value && (dmId.value ? !!contact.value : true))
 const group = computed(() => (conv.value?.kind === 'group' ? chat.state.groups[conv.value.id.slice(2)] ?? null : null))
 const isAdmin = computed(() => (group.value ? chat.isGroupAdmin(group.value.id) : false))
 const adminOf = (m: string) => !!group.value?.admins?.includes(m)
@@ -64,14 +67,16 @@ async function trust() {
 <template>
   <div v-if="conv" class="space-y-5">
     <!-- Group -->
-    <template v-if="group">
+    <template v-if="group && !showUser">
       <section>
         <h3 class="eyebrow mb-1.5 px-1">Members, {{ group.members.length }}</h3>
         <button class="btn btn-soft btn-sm mb-2 w-full" @click="addMembersGroup = group.id"><UserPlus />Add members</button>
         <ul class="space-y-0.5 text-sm">
           <li v-for="m in group.members" :key="m" class="row flex items-center gap-2.5 rounded-md px-2 py-1.5">
+            <button type="button" class="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-md text-left outline-none focus-visible:shadow-[var(--glow)]" :aria-label="`Show info for ${chat.displayName(m)}`" @click="openUser(m)">
             <UserAvatar :name="chat.displayName(m)" :id="m" :src="m === me ? chat.state.account?.avatar : chat.state.contacts[m]?.avatar" :size="32" :online="m === me ? true : chat.state.contacts[m]?.friend ? !!chat.state.contacts[m]?.online : undefined" />
-            <span class="min-w-0 flex-1 truncate font-medium">{{ chat.displayName(m) }}</span>
+            <span class="min-w-0 flex-1 truncate font-medium hover:underline">{{ chat.displayName(m) }}</span>
+            </button>
             <span v-if="adminOf(m)" class="rounded bg-primary/15 px-1.5 py-px text-[11px] font-semibold text-[var(--link)]">Admin</span>
             <span v-if="m === me" class="text-xs text-muted-foreground">you</span>
             <button v-else-if="!chat.state.contacts[m]?.friend" class="btn btn-ghost btn-icon btn-sm" title="Add friend" aria-label="Add friend" @click="addFriend(m)"><UserPlus /></button>
@@ -93,19 +98,21 @@ async function trust() {
       </section>
     </template>
 
-    <!-- Direct message -->
-    <template v-else-if="contact">
+    <!-- Person (the DM partner, or someone picked in a group) -->
+    <template v-else-if="showUser && userId">
+      <button v-if="group" class="btn btn-ghost btn-sm -mb-2" @click="panelUser = null"><ArrowLeft />Back to members</button>
       <section class="flex flex-col items-center gap-2 pt-2 text-center" style="--dot-ring: var(--sidebar)">
-        <UserAvatar :name="contact.name" :id="contact.id" :src="contact.avatar" :size="96" :online="contact.online" />
-        <h3 class="max-w-full truncate text-lg font-bold">{{ contact.name }}</h3>
-        <p class="text-xs text-muted-foreground">{{ contact.online ? 'Online' : 'Offline' }}</p>
+        <UserAvatar :name="userName" :id="userId" :src="contact?.avatar" :size="96" :online="contact?.friend ? !!contact.online : undefined" />
+        <h3 class="max-w-full truncate text-lg font-bold">{{ userName }}</h3>
+        <p v-if="contact && contact.username !== contact.name" class="max-w-full truncate text-sm text-muted-foreground">@{{ contact.username }}</p>
+        <p v-if="contact?.friend" class="text-xs text-muted-foreground">{{ contact.online ? 'Online' : 'Offline' }}</p>
         <div class="flex items-center gap-2">
-          <span class="font-mono text-sm font-semibold tracking-[0.1em]">{{ chat.formatId(contact.id) }}</span>
-          <CopyIdButton :id="contact.id" class="btn-icon" />
+          <span class="font-mono text-sm font-semibold tracking-[0.1em]">{{ chat.formatId(userId) }}</span>
+          <CopyIdButton :id="userId" class="btn-icon" />
         </div>
       </section>
 
-      <section class="space-y-2">
+      <section v-if="contact" class="space-y-2">
         <h3 class="eyebrow px-1">Security code</h3>
         <div class="well space-y-2 rounded-md p-3">
           <p class="grid grid-cols-4 gap-x-2 gap-y-1 font-mono text-[13px] tracking-wide"><span v-for="(g, i) in contact.fingerprint.split(' ')" :key="i">{{ g }}</span></p>
@@ -125,7 +132,7 @@ async function trust() {
     </template>
 
     <!-- Notifications -->
-    <section class="space-y-0.5">
+    <section v-if="!panelUser" class="space-y-0.5">
       <h3 class="eyebrow mb-1 px-1">Notifications</h3>
       <template v-if="conv.muted">
         <button class="row flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm" @click="setPrefs(conv.id, { muted: false })"><Bell class="size-4" />Unmute</button>
@@ -138,9 +145,10 @@ async function trust() {
       </button>
     </section>
 
-    <section v-if="contact" class="space-y-0.5">
-      <button v-if="contact.friend" class="row flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm text-destructive" @click="pendingAction = { kind: 'remove', id: contact.id }"><UserMinus class="size-4" />Remove friend</button>
-      <button class="row flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm text-destructive" @click="pendingAction = { kind: 'block', id: contact.id }"><Ban class="size-4" />Block</button>
+    <section v-if="showUser && userId" class="space-y-0.5">
+      <button v-if="contact?.friend" class="row flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm text-destructive" @click="pendingAction = { kind: 'remove', id: userId }"><UserMinus class="size-4" />Remove friend</button>
+      <button v-else class="btn btn-soft btn-sm mb-1 w-full" @click="addFriend(userId)"><UserPlus />Add friend</button>
+      <button class="row flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm text-destructive" @click="pendingAction = { kind: 'block', id: userId }"><Ban class="size-4" />Block</button>
     </section>
   </div>
 </template>

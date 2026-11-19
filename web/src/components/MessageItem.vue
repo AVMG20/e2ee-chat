@@ -17,7 +17,7 @@ import { chat } from '@/lib/chat'
 import { formatClock, hueOf } from '@/lib/format'
 import { docToText, renderMessageHtml } from '@/lib/render'
 import type { ChatMessage } from '@/lib/types'
-import { copyText } from '@/lib/ui'
+import { copyText, openUser } from '@/lib/ui'
 
 const props = defineProps<{
   msg: ChatMessage
@@ -134,13 +134,13 @@ function askDelete(e?: MouseEvent) {
 
         <div class="flex gap-4">
           <div class="w-10 shrink-0 pt-0.5">
-            <UserAvatar v-if="head" :name="name" :id="msg.from" :src="avatarOf(msg.from)" :size="40" />
+            <button v-if="head" type="button" class="cursor-pointer rounded-full outline-none focus-visible:shadow-[var(--glow)]" :title="name" :aria-label="`Show info for ${name}`" @click="openUser(msg.from)"><UserAvatar :name="name" :id="msg.from" :src="avatarOf(msg.from)" :size="40" /></button>
             <span v-else class="hidden pt-1 text-right text-[10px] text-muted-foreground group-hover:block">{{ time }}</span>
           </div>
 
           <div class="min-w-0 flex-1" :class="failed && 'opacity-60'">
             <div v-if="head" class="flex items-baseline gap-2 leading-snug">
-              <span class="hue-text text-[15px] font-semibold" :style="{ '--h': hueOf(msg.from) }">{{ name }}</span>
+              <button type="button" class="hue-text cursor-pointer text-left text-[15px] font-semibold outline-none hover:underline focus-visible:underline" :style="{ '--h': hueOf(msg.from) }" :aria-label="`Show info for ${name}`" @click="openUser(msg.from)">{{ name }}</button>
               <span class="text-[11px] text-muted-foreground">{{ time }}</span>
               <Clock v-if="msg.status === 'sending'" class="size-3 text-muted-foreground" aria-label="Sending" />
               <Star v-if="starred" class="size-3 self-center fill-current text-amber-500" aria-label="Starred" title="Starred" />

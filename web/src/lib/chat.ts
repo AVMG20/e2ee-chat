@@ -48,6 +48,15 @@ export const chat = {
   exportBackup: engine.exportBackup,
   /** Adds the chats from a backup file made by this account. Resolves to counts of what was added (ImportResult). */
   importBackup: engine.importBackup,
+  /**
+   * Replace my keys after a device was lost or the account may be compromised (needs the password):
+   * messages sent to me afterwards can't be read with the old keys. Signs out my other devices;
+   * contacts must accept my new security code (state.account.fingerprint) before messaging me again.
+   * rotateKeys(password, newPassword) also changes the password (do that if it may have leaked).
+   */
+  rotateKeys: engine.rotateKeys,
+  /** Set my display name ('' to use my username again). Sent encrypted to my contacts. state.account.displayName. */
+  setDisplayName: engine.setDisplayName,
   /** Readable name of this device ("Firefox on Linux"). */
   deviceName: engine.deviceName,
 
@@ -85,6 +94,10 @@ export const chat = {
   onIncoming: engine.onIncoming,
   /** Call on composer input while there's text: tells the active conversation I'm typing (throttled). */
   typing: engine.typing,
+  /** Is the user looking at the app right now (visible and focused)? */
+  isWatching: engine.isWatching,
+  /** Desktop app: report window focus changes (a window hidden in the tray may still look visible to the page). */
+  setWindowActive: engine.setWindowActive,
   /** Plain-text preview of a message, as shown in the sidebar. */
   previewText: engine.previewText,
   /** Where the desktop app can be downloaded. */

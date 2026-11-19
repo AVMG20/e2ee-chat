@@ -2,7 +2,7 @@ import { ref, watch } from 'vue'
 import { chat } from '@/lib/chat'
 import type { ConvId } from '@/lib/types'
 import { openConversation, view } from '@/lib/nav'
-import { focusWindow, isDesktop, setUnreadBadge } from '@/lib/desktop'
+import { focusWindow, isDesktop, onWindowFocus, setUnreadBadge } from '@/lib/desktop'
 
 const NOTIFY_KEY = 'e2ee-chat:notify'
 const SOUND_KEY = 'e2ee-chat:sound'
@@ -123,8 +123,11 @@ async function showDesktop(title: string, body: string, conv: ConvId) {
 
 /** Wires incoming messages to notifications/sound and the unread count to the tab title. Returns a cleanup function. */
 export function startNotifications(): () => void {
+  // A window hidden in the tray can still look visible to the page: use the window's own focus state.
+  let stopFocus = () => {}
+  if (isDesktop) void onWindowFocus((active) => chat.setWindowActive(active)).then((un) => (stopFocus = un))
   const off = chat.onIncoming((m) => {
-    const watching = !document.hidden && document.hasFocus() && view.value === 'chats' && chat.state.active === m.conv
+    const watching = chat.isWatching() && view.value === 'chats' && chat.state.active === m.conv
     if (watching) return
     const conv = chat.state.conversations.find((c) => c.id === m.conv)
     if (!chat.shouldNotify(m)) return
@@ -161,6 +164,7 @@ export function startNotifications(): () => void {
   return () => {
     off()
     stop()
+    stopFocus()
     document.title = BASE_TITLE
     void setUnreadBadge(0)
   }

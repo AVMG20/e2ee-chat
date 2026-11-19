@@ -81,7 +81,14 @@ export interface Identity {
   signPk: Uint8Array
   encSk: Uint8Array
   encPk: Uint8Array
+  /** Earlier keys, newest first (after changing keys): only used to open older messages and backups. */
+  old?: Identity[]
+  /** For an earlier key: the last server seq from before it was replaced. My own messages signed with it are only accepted up to there. */
+  until?: number
 }
+
+/** Most earlier key pairs kept (they have to fit in the locked bundle on the server). */
+export const MAX_OLD_KEYS = 20
 
 export interface PublicKeys {
   signPk: Uint8Array
@@ -221,16 +228,36 @@ export class OpenError extends Error {}
  * `senderSignPk` must be the sender's pinned key, never one taken from the envelope.
  */
 export function open(me: Identity, myName: string, senderSignPk: Uint8Array, env: Envelope): Uint8Array {
-  if (env.v !== ENVELOPE_VERSION) throw new OpenError('unsupported envelope version')
-  const { sig, ...unsigned } = env
-  let ok = false
-  try {
-    ok = ed25519.verify(unb64(sig), signedBytes(unsigned), senderSignPk, { zip215: false })
-  } catch {
-    ok = false
-  }
-  if (!ok) throw new OpenError('bad signature')
+  return openAny([me], myName, senderSignPk, env)
+}
 
+/** Is the envelope signed by this key? */
+export function signedBy(senderSignPk: Uint8Array, env: Envelope): boolean {
+  if (env.v !== ENVELOPE_VERSION) return false
+  const { sig, ...unsigned } = env
+  try {
+    return ed25519.verify(unb64(sig), signedBytes(unsigned), senderSignPk, { zip215: false })
+  } catch {
+    return false
+  }
+}
+
+/** Like open(), trying each of my key pairs (current, then earlier ones) to decrypt. The signature is checked once. */
+export function openAny(mes: Identity[], myName: string, senderSignPk: Uint8Array, env: Envelope): Uint8Array {
+  if (env.v !== ENVELOPE_VERSION) throw new OpenError('unsupported envelope version')
+  if (!signedBy(senderSignPk, env)) throw new OpenError('bad signature')
+  let error: unknown = new OpenError('decryption failed')
+  for (const me of mes) {
+    try {
+      return decryptFor(me, myName, env)
+    } catch (e) {
+      error = e
+    }
+  }
+  throw error
+}
+
+function decryptFor(me: Identity, myName: string, env: Envelope): Uint8Array {
   const mine = env.keys.find((k) => k.to === myName)
   if (!mine) throw new OpenError('not addressed to me')
   let contentKey: Uint8Array
@@ -291,7 +318,8 @@ export async function deriveFromPassword(password: string, salt: Uint8Array): Pr
 /** Encrypts the private keys with the password-derived lock key. */
 export function lockIdentity(id: Identity, lockKey: Uint8Array, username: string): string {
   const nonce = randomBytes(24)
-  const plain = utf8(JSON.stringify({ signSk: b64(id.signSk), encSk: b64(id.encSk) }))
+  const old = (id.old ?? []).slice(0, MAX_OLD_KEYS).map((o) => ({ signSk: b64(o.signSk), encSk: b64(o.encSk), until: o.until ?? 0 }))
+  const plain = utf8(JSON.stringify({ signSk: b64(id.signSk), encSk: b64(id.encSk), ...(old.length ? { old } : {}) }))
   const ct = xchacha20poly1305(lockKey, nonce, utf8(`${BUNDLE_CONTEXT}\n${username}`)).encrypt(plain)
   return b64(concat(nonce, ct))
 }
@@ -301,10 +329,27 @@ export function unlockIdentity(bundle: string, lockKey: Uint8Array, username: st
   const plain = xchacha20poly1305(lockKey, raw.subarray(0, 24), utf8(`${BUNDLE_CONTEXT}\n${username}`)).decrypt(
     raw.subarray(24),
   )
-  const { signSk, encSk } = JSON.parse(new TextDecoder().decode(plain)) as { signSk: string; encSk: string }
+  type Pair = { signSk: string; encSk: string; until?: number }
+  const { signSk, encSk, old } = JSON.parse(new TextDecoder().decode(plain)) as Pair & { old?: Pair[] }
+  const id = keyPair(signSk, encSk)
+  if (Array.isArray(old) && old.length) {
+    id.old = old.slice(0, MAX_OLD_KEYS).map((o) => ({ ...keyPair(o.signSk, o.encSk), until: typeof o.until === 'number' ? o.until : 0 }))
+  }
+  return id
+}
+
+function keyPair(signSk: string, encSk: string): Identity {
   const sk = unb64(signSk)
   const ek = unb64(encSk)
   return { signSk: sk, signPk: ed25519.getPublicKey(sk), encSk: ek, encPk: x25519.getPublicKey(ek) }
+}
+
+/** New keys for an account; the current ones move to `old`, valid for my own messages up to server seq `until`. */
+export function rotateIdentity(current: Identity, until: number): Identity {
+  const next = generateIdentity()
+  const { old, until: _u, ...plain } = current
+  next.old = [{ ...plain, until }, ...(old ?? [])].slice(0, MAX_OLD_KEYS)
+  return next
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +368,10 @@ export function sealVault(id: Identity, data: unknown): string {
   return b64(concat(nonce, ct))
 }
 
+/**
+ * Opens the vault. Only with my current key: whoever has an earlier (maybe leaked) key must not be
+ * able to plant settings such as contact keys. Changing keys re-seals the vault in the same step.
+ */
 export function openVault(id: Identity, sealed: string): unknown {
   const raw = unb64(sealed)
   const plain = xchacha20poly1305(vaultKey(id), raw.subarray(0, 24), utf8(VAULT_CONTEXT)).decrypt(raw.subarray(24))
@@ -354,15 +403,24 @@ export function openRecord(key: Uint8Array, sealed: Uint8Array, aad: Uint8Array)
 
 const NOTICE_CONTEXT = 'e2ee-chat/notice/v1\n'
 
+/**
+ * Signed with my current key and each earlier one ("sig.sig.…"), so a device that still has an
+ * earlier key (say, a lost one after I changed keys) can check it too.
+ */
 export function signNotice(id: Identity, text: string): string {
-  return b64(ed25519.sign(utf8(NOTICE_CONTEXT + text), id.signSk))
+  const msg = utf8(NOTICE_CONTEXT + text)
+  return [id, ...(id.old ?? [])].map((k) => b64(ed25519.sign(msg, k.signSk))).join('.')
 }
 
+/** True if any of the signatures is by this key. */
 export function verifyNotice(signPk: Uint8Array, text: string, sig: unknown): boolean {
-  if (typeof sig !== 'string' || sig.length > 200) return false
-  try {
-    return ed25519.verify(unb64(sig), utf8(NOTICE_CONTEXT + text), signPk, { zip215: false })
-  } catch {
-    return false
-  }
+  if (typeof sig !== 'string' || sig.length > 4096) return false
+  const msg = utf8(NOTICE_CONTEXT + text)
+  return sig.split('.').slice(0, MAX_OLD_KEYS + 1).some((one) => {
+    try {
+      return ed25519.verify(unb64(one), msg, signPk, { zip215: false })
+    } catch {
+      return false
+    }
+  })
 }

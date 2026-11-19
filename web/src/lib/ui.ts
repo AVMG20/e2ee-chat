@@ -1,4 +1,4 @@
-import { onBeforeUnmount, ref } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { chat } from '@/lib/chat'
 import { errMsg, formatClock } from '@/lib/format'
@@ -11,6 +11,21 @@ export const paletteOpen = ref(false)
 /** Right-hand panel of the conversation view; stays open when switching chats. */
 export type SidePanel = 'info' | 'search' | 'media' | 'starred'
 export const sidePanel = ref<SidePanel | null>(null)
+/** User whose profile the Info panel shows (instead of the chat's own info). Cleared when the chat changes. */
+export const panelUser = ref<string | null>(null)
+watch(() => chat.state.active, () => (panelUser.value = null))
+
+/** Click on a person: me opens account settings, anyone else opens their profile in the Info panel. */
+export function openUser(id: string) {
+  if (id === chat.state.account?.id) {
+    accountOpen.value = true
+    return
+  }
+  const active = chat.state.active
+  panelUser.value = active && active === `dm:${id}` ? null : id
+  sidePanel.value = 'info'
+}
+
 /** Starred panel: only the open chat, or every chat. */
 export const starredScope = ref<'chat' | 'all'>('chat')
 

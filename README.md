@@ -11,7 +11,7 @@ A self-hosted, end-to-end encrypted chat app for you and your friends. Use it in
 - Forward and star messages, a media gallery per chat
 - Messages written offline are sent when you're back online
 - History on all your devices, and encrypted backups you can import again
-- See and sign out your devices, or delete your account
+- See and sign out your devices, change your security keys if a device is lost, or delete your account
 - Installable as an app on phones (PWA); the desktop app updates itself
 - One Rust binary with SQLite, nothing else to run
 

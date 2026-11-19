@@ -10,14 +10,16 @@ import {
   fingerprint,
   generateIdentity,
   lockIdentity,
-  open as openEnvelope,
+  openAny,
   openVault,
   randomId,
   recipientsOf,
   sameKeys,
   seal,
+  rotateIdentity,
   sealVault,
   signNotice,
+  signedBy,
   unb64,
   verifyNotice,
   unlockIdentity,
@@ -57,7 +59,7 @@ type PayloadBody =
   /** I've read the conversation up to this message time. Also syncs unread counts between my devices. */
   | { t: 'read'; ts: number; with?: string }
   /** My profile picture (the attachment; empty to remove it). Sent to all my contacts. */
-  | { t: 'profile'; mime: string }
+  | { t: 'profile'; mime: string; name?: string }
   /** Only the author's own messages can be edited or deleted (checked on receipt). */
   | { t: 'edit'; target: string; doc: JSONContent }
   | { t: 'delete'; target: string }
@@ -143,7 +145,7 @@ function validHeader(h: PayloadHeader): boolean {
     case 'read':
       return typeof b.ts === 'number' && Number.isFinite(b.ts) && (b.with === undefined || validId(b.with))
     case 'profile':
-      return isStr(b.mime)
+      return isStr(b.mime) && (b.name === undefined || (isStr(b.name) && b.name.length <= 64))
     default:
       return false
   }
@@ -182,6 +184,8 @@ interface Pin {
    * device already has, so a server can't push swapped keys to all my devices.
    */
   at: number
+  /** Their earlier signing keys (after they changed keys): accepted only for messages dated before `until`. */
+  prev?: { signPk: string; until: number }[]
 }
 interface ConvMeta {
   unread: number
@@ -222,6 +226,8 @@ interface Profile {
   /** Profile picture (base64), or null. */
   avatar: string | null
   mime: string
+  /** Display name shown instead of my username ('' or missing: the username). */
+  name?: string
   at: number
   /** When it was last sent to all contacts (it's re-sent before old copies expire on the server). */
   sentAt: number
@@ -230,6 +236,8 @@ interface StoredAvatar {
   at: number
   mime: string
   bytes: Uint8Array
+  /** Their display name, if they set one. */
+  name?: string
 }
 interface Saved {
   server: string
@@ -261,6 +269,8 @@ const K = {
   held: 'held',
   conv: (c: ConvId) => `conv:${c}`,
   out: (envId: string) => `out:${envId}`,
+  /** New keys being sent to the server (kept until it's clear whether the change went through). */
+  pendingKeys: 'pendingKeys',
   file: (mid: string) => `file:${mid}`,
   seen: (mid: string) => `seen:${mid}`,
   avatar: (id: string) => `avatar:${id}`,
@@ -371,6 +381,7 @@ type ServerMsg =
   | { type: 'users'; req: number; users: ServerUser[] }
   | { type: 'vault'; vault: string }
   | { type: 'sessions'; req: number; sessions: Device[] }
+  | { type: 'head'; req: number; seq: number }
   | { type: 'pong' }
 
 /** An error message from the server (as opposed to a network problem). */
@@ -515,6 +526,8 @@ class Session {
   prefs: Dict<ConvPrefs> = dict()
   settings: Settings = defaultSettings()
   profile: Profile = defaultProfile()
+  /** Display names contacts chose (user ID → name). */
+  names = new Map<string, string>()
   /** Object URLs of profile pictures (user ID → URL); mine under my own ID. */
   avatarUrls = new Map<string, string>()
   /** Contacts to send my profile picture to (new contacts), batched. */
@@ -532,8 +545,10 @@ class Session {
   held: Held[] = []
   /** What the server currently says about users we've looked up, by ID. */
   serverUsers: Dict<ServerUser> = dict()
-  /** Keys replaced by trustNewKey this session: held messages may still be signed with them. */
-  retiredPins: Dict<Pin> = dict()
+  /** When a contact was last looked up again after a message failed to verify (at most once a minute). */
+  relooked = new Map<string, number>()
+  /** My profile changed since it was last written to disk (it can be large: an animated GIF). */
+  profileDirty = false
   /** The vault as last seen on the server. */
   remoteVault: VaultData | null = null
   /** Users the server says don't exist (deleted accounts): left out when sending to a group. */
@@ -635,7 +650,6 @@ async function flush(s: Session) {
     [K.prefs, { ...s.prefs }],
     [K.stars, { ...s.stars }],
     [K.settings, s.settings],
-    [K.profile, s.profile],
     [K.meta, { ...s.meta }],
     [K.held, s.held],
   ]
@@ -644,6 +658,9 @@ async function flush(s: Session) {
     if (list) entries.push([K.conv(c), list])
   }
   for (const mid of s.newSeen) entries.push([K.seen(mid), 1])
+  const profileDirty = s.profileDirty
+  if (profileDirty) entries.push([K.profile, s.profile])
+  s.profileDirty = false
   // Last: if anything before it can't be stored, the cursor stays put and the server sends those messages again.
   entries.push([K.cursor, s.cursor])
   const dirty = [...s.dirtyConvs]
@@ -655,6 +672,7 @@ async function flush(s: Session) {
   } catch (e) {
     for (const c of dirty) s.dirtyConvs.add(c)
     s.newSeen.push(...seen)
+    if (profileDirty) s.profileDirty = true
     throw e
   }
 }
@@ -679,9 +697,14 @@ function validPin(p: unknown): p is Pin {
     typeof q.verified === 'boolean' &&
     typeof q.at === 'number' &&
     unb64(q.signPk).length === 32 &&
-    unb64(q.encPk).length === 32
+    unb64(q.encPk).length === 32 &&
+    (q.prev === undefined ||
+      (Array.isArray(q.prev) && q.prev.length <= MAX_PREV_KEYS &&
+        q.prev.every((k) => k && isStr(k.signPk) && unb64(k.signPk).length === 32 && typeof k.until === 'number')))
   )
 }
+
+const MAX_PREV_KEYS = 5
 
 function validGroup(g: unknown): g is Group {
   if (!g || typeof g !== 'object') return false
@@ -711,7 +734,8 @@ function validStarKey(k: string): boolean {
 const validConvId = (c: string): c is ConvId =>
   (c.startsWith('dm:') && validId(c.slice(3))) || (c.startsWith('g:') && validGroupId(c.slice(2)))
 
-const MAX_AVATAR_BYTES = 96 * 1024
+/** Profile pictures: still images are shrunk to fit easily; animated GIFs are kept as they are, up to this size. */
+const MAX_AVATAR_BYTES = 256 * 1024
 
 function parseVault(raw: unknown): VaultData {
   const v = (raw && typeof raw === 'object' ? raw : {}) as Partial<VaultData>
@@ -720,7 +744,11 @@ function parseVault(raw: unknown): VaultData {
   }
   for (const [id, p] of Object.entries(dict(v.pins))) {
     try {
-      if (validId(id) && validPin(p)) out.pins[id] = { ...p, name: cleanLabel(p.name, 32) }
+      if (validId(id) && validPin(p)) {
+        const pin: Pin = { name: cleanLabel(p.name, 32), signPk: p.signPk, encPk: p.encPk, verified: p.verified, at: p.at }
+        if (p.prev?.length) pin.prev = p.prev.map((k) => ({ signPk: k.signPk, until: k.until }))
+        out.pins[id] = pin
+      }
     } catch {
       /* bad base64 */
     }
@@ -750,6 +778,8 @@ function parseVault(raw: unknown): VaultData {
     (pr.avatar === null || (isStr(pr.avatar) && pr.avatar.length <= (MAX_AVATAR_BYTES * 4) / 3 + 4))
   ) {
     out.profile = { avatar: pr.avatar, mime: safeMime(pr.mime), at: pr.at, sentAt: pr.sentAt }
+    const name = isStr(pr.name) ? cleanLabel(pr.name, MAX_DISPLAY_NAME) : ''
+    if (name) out.profile.name = name
   }
   for (const [id, t] of Object.entries(dict(v.left))) if (validGroupId(id) && typeof t === 'number') out.left[id] = t
   return out
@@ -782,18 +812,10 @@ function scheduleVaultPush(s: Session) {
 
 async function pushVault(s: Session) {
   if (!live(s) || !s.conn || !vaultBehind(s)) return
-  const data: VaultData = {
-    pins: { ...s.pins },
-    groups: rawGroups(),
-    left: { ...s.left },
-    prefs: { ...s.prefs },
-    settings: s.settings,
-    profile: s.profile,
-    stars: { ...s.stars },
-  }
+  const data = vaultData(s)
   try {
     await request(s, { type: 'vault_put', vault: sealVault(s.identity, data) })
-    s.remoteVault = parseVault(JSON.parse(JSON.stringify(data)))
+    s.remoteVault = parseVault(data)
   } catch (e) {
     console.warn('could not sync settings', e)
   }
@@ -844,9 +866,11 @@ async function applyVault(s: Session, sealed: string | null | undefined) {
     }
     if (remote.profile.at > s.profile.at) {
       s.profile = remote.profile
+      s.profileDirty = true
       showMyAvatar(s)
     } else if (remote.profile.at === s.profile.at && remote.profile.sentAt > s.profile.sentAt) {
       s.profile.sentAt = remote.profile.sentAt
+      s.profileDirty = true
     }
     scheduleFlush(s)
     refreshConversations()
@@ -884,7 +908,8 @@ function updateContactFromPin(s: Session, id: string, patch: Partial<Contact> = 
   const changed = !!serverKeys && !sameKeys(pinKeys(pin), serverKeys)
   state.contacts[id] = {
     id,
-    name: pin.name,
+    name: s.names.get(id) || pin.name,
+    username: pin.name,
     friend: prev?.friend ?? false,
     online: prev?.online ?? false,
     fingerprint: fingerprint(pinKeys(pin)),
@@ -917,19 +942,34 @@ function showMyAvatar(s: Session) {
     /* corrupt: show initials */
   }
   setAvatarUrl(s, s.me, bytes, s.profile.mime)
-  if (state.account) state.account.avatar = s.avatarUrls.get(s.me) ?? null
+  if (state.account) {
+    state.account.avatar = s.avatarUrls.get(s.me) ?? null
+    state.account.displayName = s.profile.name || s.saved.username
+  }
 }
 
-/** Stores a contact's profile picture if it's newer than the one I have. Only call from inside serial(). */
-async function receiveProfile(s: Session, sender: string, ts: number, mime: string, bytes: Uint8Array) {
+const MAX_DISPLAY_NAME = 32
+
+/** Stores a contact's profile picture and display name if newer than what I have. Only call from inside serial(). */
+async function receiveProfile(s: Session, sender: string, ts: number, mime: string, bytes: Uint8Array, rawName?: string) {
   if (bytes.length > MAX_AVATAR_BYTES || (bytes.length && !SAFE_MIME.has(mime))) return
   const prev = await get<StoredAvatar>(K.avatar(sender), db)
   if (prev && prev.at >= ts) return
-  await set(K.avatar(sender), { at: ts, mime, bytes } satisfies StoredAvatar, db)
+  const name = rawName ? cleanLabel(rawName, MAX_DISPLAY_NAME) : ''
+  const stored: StoredAvatar = { at: ts, mime, bytes }
+  if (name) stored.name = name
+  await set(K.avatar(sender), stored, db)
   if (!live(s)) return
   setAvatarUrl(s, sender, bytes, mime)
-  const c = state.contacts[sender]
-  if (c) c.avatar = s.avatarUrls.get(sender) ?? null
+  setDisplayNameOf(s, sender, name)
+}
+
+/** A contact's chosen name (or '' for their username); shown everywhere instead of the username. */
+function setDisplayNameOf(s: Session, id: string, name: string) {
+  if (name) s.names.set(id, name)
+  else s.names.delete(id)
+  if (state.contacts[id]) updateContactFromPin(s, id)
+  refreshConversations()
 }
 
 /** Everyone I can send to: pinned contacts whose key hasn't changed. */
@@ -945,13 +985,15 @@ function sendProfile(s: Session, ids: string[]) {
   const bytes = s.profile.avatar ? unb64(s.profile.avatar) : new Uint8Array(0)
   const at = s.profile.at || Date.now()
   for (let i = 0; i < ids.length; i += 200) {
-    sendEnvelope(s, ids.slice(i, i + 200), { conv: { t: 'dm' }, body: { t: 'profile', mime: s.profile.mime } }, bytes, randomId(), at)
+    const body: PayloadBody = { t: 'profile', mime: s.profile.mime }
+    if (s.profile.name) body.name = s.profile.name
+    sendEnvelope(s, ids.slice(i, i + 200), { conv: { t: 'dm' }, body }, bytes, randomId(), at)
   }
 }
 
 /** New contacts get my picture shortly after I first see them. */
 function queueProfile(s: Session, id: string) {
-  if (!s.profile.avatar || s.fresh) return
+  if ((!s.profile.avatar && !s.profile.name) || s.fresh) return
   s.profileQueue.add(id)
   if (s.profileTimer) return
   s.profileTimer = setTimeout(() => {
@@ -970,10 +1012,11 @@ function queueProfile(s: Session, id: string) {
 
 /** Messages on the server expire, so my picture is re-sent to everyone every 60 days. */
 function refreshProfile(s: Session) {
-  if (!s.profile.avatar || Date.now() - s.profile.sentAt < 60 * 86_400_000) return
+  if ((!s.profile.avatar && !s.profile.name) || Date.now() - s.profile.sentAt < 60 * 86_400_000) return
   try {
     sendProfile(s, profileAudience(s))
     s.profile.sentAt = Date.now()
+    s.profileDirty = true
     scheduleFlush(s)
     scheduleVaultPush(s)
   } catch (e) {
@@ -1148,7 +1191,8 @@ async function appendMessage(s: Session, m: ChatMessage, countUnread: boolean) {
     meta.lastTs = m.ts
     meta.preview = previewLine(s, m)
   }
-  if (countUnread && !s.fresh && state.active !== m.conv) meta.unread++
+  // Also counted in the open chat while the app isn't being looked at (cleared on return).
+  if (countUnread && !s.fresh && (state.active !== m.conv || !watching())) meta.unread++
   s.meta[m.conv] = meta
   if (countUnread && !s.fresh) {
     const p = s.prefs[m.conv]
@@ -1260,7 +1304,7 @@ function handleSignal(s: Session, env: Envelope) {
   if (sender === s.me || !pin || state.contacts[sender]?.keyChanged) return
   let header: PayloadHeader
   try {
-    header = decodePayload(openEnvelope(s.identity, s.me, unb64(pin.signPk), env)).header
+    header = decodePayload(openAny([s.identity, ...(s.identity.old ?? [])], s.me, unb64(pin.signPk), env)).header
   } catch {
     return
   }
@@ -1304,11 +1348,13 @@ function mentionsMe(s: Session, m: ChatMessage): boolean {
   if (!m.from || m.from === s.me) return false
   if (m.reply?.from === s.me) return true
   if (m.kind !== 'text') return false
-  const name = s.saved.username.toLowerCase()
   const text = docToText(m.doc).toLowerCase()
-  for (let i = text.indexOf('@' + name); i >= 0; i = text.indexOf('@' + name, i + 1)) {
-    const after = text[i + 1 + name.length]
-    if (after === undefined || !/[a-z0-9_.]/.test(after)) return true
+  const names = new Set([s.saved.username, s.profile.name].filter((n): n is string => !!n).map((n) => n.toLowerCase()))
+  for (const name of names) {
+    for (let i = text.indexOf('@' + name); i >= 0; i = text.indexOf('@' + name, i + 1)) {
+      const after = text[i + 1 + name.length]
+      if (after === undefined || !/[a-z0-9_.]/.test(after)) return true
+    }
   }
   return false
 }
@@ -1317,7 +1363,51 @@ function mentionsMe(s: Session, m: ChatMessage): boolean {
 // Read receipts
 // ---------------------------------------------------------------------------
 
-const watching = () => typeof document !== 'undefined' && document.visibilityState === 'visible' && document.hasFocus()
+/**
+ * Is the user looking at the app? The desktop app reports its window focus (setWindowActive),
+ * since a window hidden in the tray doesn't always look hidden to the page.
+ */
+let windowActive: boolean | null = null
+const watching = () =>
+  typeof document !== 'undefined' && document.visibilityState === 'visible' && (windowActive ?? document.hasFocus())
+
+/** Desktop app: the window gained or lost focus (or was hidden). */
+export function setWindowActive(active: boolean) {
+  windowActive = active
+  if (active) poke()
+}
+
+export function isWatching(): boolean {
+  return watching()
+}
+
+/** Back in the app with a chat open: what arrived meanwhile is read now (marked with the New line). */
+function catchUpActive(s: Session) {
+  const conv = state.active
+  const meta = conv ? s.meta[conv] : undefined
+  if (!conv || !meta?.unread) return
+  const n = meta.unread
+  meta.unread = 0
+  scheduleFlush(s)
+  refreshConversations()
+  {
+    const shown = state.messages
+    let left = n
+    for (let i = shown.length - 1; i >= 0 && left > 0; i--) {
+      const m = shown[i]!
+      if (m.from && m.from !== s.me) {
+        state.firstUnread = m.id
+        left--
+      }
+    }
+  }
+}
+
+function poke() {
+  if (!session || !state.active || !watching()) return
+  catchUpActive(session)
+  scheduleRead(session)
+}
 
 function scheduleRead(s: Session) {
   clearTimeout(s.readTimer)
@@ -1355,7 +1445,6 @@ async function sendRead(s: Session) {
 }
 
 if (typeof window !== 'undefined') {
-  const poke = () => session && state.active && scheduleRead(session)
   window.addEventListener('focus', poke)
   document.addEventListener('visibilitychange', poke)
 }
@@ -1522,22 +1611,54 @@ async function receiveEnvelope(s: Session, seq: number, env: Envelope) {
     }
   }
 
-  let plain: Uint8Array
-  try {
-    plain = openEnvelope(s.identity, s.me, signPk, env)
-  } catch (e) {
-    const retired = s.retiredPins[sender]
+  // My earlier keys (after changing keys) still decrypt what was sent to them. As a signature on
+  // my own messages, an earlier key only counts for messages stored before it was replaced.
+  const myKeys = [s.identity, ...(s.identity.old ?? [])]
+  let signers: Uint8Array[]
+  if (mine) {
+    signers = [s.identity.signPk, ...(s.identity.old ?? []).filter((o) => seq <= (o.until ?? 0)).map((o) => o.signPk)]
+  } else {
+    // A contact's earlier key (they changed keys) only for messages dated before I accepted the new one.
+    const prev = (s.pins[sender]?.prev ?? []).filter((k) => env.ts < k.until).map((k) => unb64(k.signPk))
+    signers = [signPk, ...prev]
+  }
+  const signer = signers.find((pk) => signedBy(pk, env))
+  let plain: Uint8Array | null = null
+  if (signer) {
     try {
-      if (!retired) throw e
-      plain = openEnvelope(s.identity, s.me, unb64(retired.signPk), env)
+      plain = openAny(myKeys, s.me, signer, env)
     } catch {
-      console.warn(`dropping undecryptable message from ${sender}:`, e)
-      return
+      /* not for me / damaged */
     }
+  }
+  if (!signer && !mine && s.pins[sender]) {
+    // Not signed with the key I know: maybe they changed their keys. Ask the server again (at most
+    // once a minute per person); if it reports new keys, hold the message until they're accepted.
+    const last = s.relooked.get(sender) ?? 0
+    if (Date.now() - last > 60_000) {
+      s.relooked.set(sender, Date.now())
+      delete s.serverUsers[sender]
+      try {
+        await lookup(s, [sender])
+      } catch {
+        s.held.push({ seq, env }) // can't tell now: try again after the next sync
+        scheduleFlush(s)
+        return
+      }
+      if (state.contacts[sender]?.keyChanged) {
+        s.held.push({ seq, env })
+        scheduleFlush(s)
+        return
+      }
+    }
+  }
+  if (!plain) {
+    console.warn(`dropping undecryptable message from ${sender}`)
+    return
   }
   // The envelope is authentic: whatever happens next, never process it twice.
   try {
-    const { header, attachment } = decodePayload(plain)
+    const { header, attachment } = decodePayload(plain!)
     if (!validHeader(header)) throw new Error('invalid header')
     const ts = Math.min(env.ts, Date.now() + 60_000)
     await handlePayload(s, sender, recipientsOf(env), mid, ts, header, attachment)
@@ -1629,7 +1750,7 @@ async function handlePayload(
 
   if (body.t === 'profile') {
     if (mine || pc.t !== 'dm' || !s.pins[sender] || state.blocked.some((b) => b.id === sender)) return
-    await receiveProfile(s, sender, ts, body.mime, attachment)
+    await receiveProfile(s, sender, ts, body.mime, attachment, body.name)
     return
   }
 
@@ -1722,6 +1843,12 @@ function flushOutbox(s: Session) {
   if (!live(s) || !s.conn) return
   const queued = [...s.outbox.entries()].filter(([id]) => !s.inflight.has(id)).sort((a, b) => a[1].env.ts - b[1].env.ts)
   for (const [id, o] of queued) {
+    if (!signedBy(s.identity.signPk, o.env)) {
+      // Sealed before I changed keys: shown as failed, so Retry seals it again with the new keys.
+      dropOutgoing(s, id)
+      void updateMessageStatus(s, o.conv, o.mid, 'failed')
+      continue
+    }
     if (!s.conn.send({ type: 'send', envelope: o.env })) return
     s.inflight.add(id)
     s.tried.add(id)
@@ -1736,7 +1863,7 @@ function dispatch(s: Session, m: ServerMsg) {
   if (!live(s)) return
   // Replies to requests are handled right away, never behind the message queue.
   const req = 'req' in m && typeof m.req === 'number' && m.req > 0 ? m.req : 0
-  if (req && (m.type === 'ok' || m.type === 'users' || m.type === 'prelogin' || m.type === 'sessions' || m.type === 'error')) {
+  if (req && (m.type === 'ok' || m.type === 'users' || m.type === 'prelogin' || m.type === 'sessions' || m.type === 'head' || m.type === 'error')) {
     const r = s.requests.get(req)
     s.requests.delete(req)
     if (m.type === 'error') r?.reject(new ServerError(m.message, isStr(m.code) ? m.code : undefined))
@@ -1810,7 +1937,11 @@ function attach(s: Session, conn: Conn, w: Welcome) {
   state.status = 'online'
   state.syncing = true
   conn.onClose = () => onClosed(s, conn)
-  void serial(s, () => applyVault(s, w.vault))
+  void serial(s, async () => {
+    // Before any message is handled: they may already be sealed to keys this device just changed to.
+    await settleKeyChange(s).catch(noop)
+    await applyVault(s, w.vault)
+  })
   conn.attach((m) => dispatch(s, m))
   clearInterval(s.pingTimer)
   s.pingTimer = setInterval(() => s.conn?.send({ type: 'ping' }), 25_000)
@@ -1989,12 +2120,16 @@ async function loadSession(saved: Saved): Promise<Session> {
   avatarKeys.forEach((key, i) => {
     const a = avatars[i]
     if (a?.bytes instanceof Uint8Array) setAvatarUrl(s, key.slice(7), a.bytes, a.mime)
+    if (a?.name && isStr(a.name)) s.names.set(key.slice(7), a.name)
   })
 
   if (session) stop(session)
   session = s
   resetState()
-  state.account = { server: saved.server, id: saved.id, username: saved.username, avatar: null }
+  state.account = {
+    server: saved.server, id: saved.id, username: saved.username, avatar: null, displayName: saved.username,
+    fingerprint: fingerprint({ signPk: saved.identity.signPk, encPk: saved.identity.encPk }),
+  }
   state.settings = { readReceipts: s.settings.readReceipts }
   showMyAvatar(s)
   state.groups = vault.groups
@@ -2192,7 +2327,7 @@ export function formatId(id: string): string {
 
 export function displayName(id: string): string {
   if (!id) return ''
-  if (session && id === session.me) return session.saved.username
+  if (session && id === session.me) return session.profile.name || session.saved.username
   return state.contacts[id]?.name ?? session?.serverUsers[id]?.name ?? formatId(id)
 }
 
@@ -2221,6 +2356,11 @@ export function removeFriend(id: string) {
   return friendOp('friend_remove', id)
 }
 
+/** Only friends (or people I already have a chat with) get a DM; a note must not create one for a group member. */
+function hasDm(s: Session, id: string): boolean {
+  return !!state.contacts[id]?.friend || !!s.meta[`dm:${id}`]
+}
+
 export async function setVerified(id: string, verified: boolean) {
   const s = requireSession()
   const pin = s.pins[id]
@@ -2229,7 +2369,7 @@ export async function setVerified(id: string, verified: boolean) {
   pin.at = Date.now()
   updateContactFromPin(s, id)
   pinsChanged(s)
-  await systemMessage(s, `dm:${id}`, `You marked ${displayName(id)} as ${verified ? 'verified' : 'not verified'}`)
+  if (hasDm(s, id)) await systemMessage(s, `dm:${id}`, `You marked ${displayName(id)} as ${verified ? 'verified' : 'not verified'}`)
 }
 
 /**
@@ -2245,11 +2385,14 @@ export async function trustNewKey(id: string, seenFingerprint: string) {
     throw new Error(`${displayName(id)}'s key changed again. Compare the new security code before accepting.`)
   }
   const old = s.pins[id]
-  if (old) s.retiredPins[id] = old
-  s.pins[id] = { name: old?.name ?? u.name, signPk: u.signPk, encPk: u.encPk, verified: false, at: Date.now() }
+  const now = Date.now()
+  const pin: Pin = { name: old?.name ?? u.name, signPk: u.signPk, encPk: u.encPk, verified: false, at: now }
+  // Their messages from before the change stay readable (also on my other devices, through the vault).
+  if (old) pin.prev = [{ signPk: old.signPk, until: now }, ...(old.prev ?? [])].slice(0, MAX_PREV_KEYS)
+  s.pins[id] = pin
   updateContactFromPin(s, id)
   pinsChanged(s)
-  await systemMessage(s, `dm:${id}`, `You accepted a new security key for ${displayName(id)}`)
+  if (hasDm(s, id)) await systemMessage(s, `dm:${id}`, `You accepted a new security key for ${displayName(id)}`)
   await serial(s, () => retryHeld(s))
 }
 
@@ -2665,6 +2808,14 @@ export interface CropArea {
 
 /** Crops to a square (the given area, or the middle) and shrinks to fit MAX_AVATAR_BYTES. */
 async function encodeAvatar(file: Blob, crop?: CropArea): Promise<{ bytes: Uint8Array; mime: string }> {
+  if (file.type === 'image/gif') {
+    // Kept as is, so it stays animated (round avatars show the middle of it).
+    if (file.size > MAX_AVATAR_BYTES) throw new Error(`GIFs can be up to ${MAX_AVATAR_BYTES / 1024} KB`)
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    const head = new TextDecoder().decode(bytes.subarray(0, 6))
+    if (head !== 'GIF87a' && head !== 'GIF89a') throw new Error("That image couldn't be opened")
+    return { bytes, mime: 'image/gif' }
+  }
   let bmp: ImageBitmap
   try {
     bmp = await createImageBitmap(file)
@@ -2687,7 +2838,7 @@ async function encodeAvatar(file: Blob, crop?: CropArea): Promise<{ bytes: Uint8
     let blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/webp', q))
     // Safari can't encode WebP and hands back PNG.
     if (blob?.type !== 'image/webp') blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', q))
-    if (blob && blob.size <= MAX_AVATAR_BYTES) return { bytes: new Uint8Array(await blob.arrayBuffer()), mime: blob.type }
+    if (blob && blob.size <= 96 * 1024) return { bytes: new Uint8Array(await blob.arrayBuffer()), mime: blob.type }
   }
   throw new Error("That image couldn't be made small enough")
 }
@@ -2701,12 +2852,14 @@ export async function setAvatar(file: Blob | null, crop?: CropArea) {
   const img = file ? await encodeAvatar(file, crop) : null
   if (!live(s)) return
   s.profile = { avatar: img ? b64(img.bytes) : null, mime: img?.mime ?? '', at: Date.now(), sentAt: 0 }
+  s.profileDirty = true
   showMyAvatar(s)
   scheduleFlush(s)
   scheduleVaultPush(s)
   try {
     sendProfile(s, profileAudience(s))
     s.profile.sentAt = Date.now()
+    s.profileDirty = true
   } catch {
     /* sent after reconnecting (sentAt stays 0) */
   }
@@ -3072,7 +3225,9 @@ function backupMessage(conv: ConvId, raw: unknown): ChatMessage | null {
 export async function importBackup(file: Blob): Promise<ImportResult> {
   const s = requireSession()
   const { backupKey, openRecord } = await import('./crypto')
-  const key = backupKey(s.identity, BACKUP_CONTEXT)
+  // Backups made before changing keys open with an earlier key.
+  const keys = [s.identity, ...(s.identity.old ?? [])].map((k) => backupKey(k, BACKUP_CONTEXT))
+  let key = keys[0]!
   const data = new Uint8Array(await file.arrayBuffer())
   const magic = new TextEncoder().encode(BACKUP_MAGIC)
   if (data.length < magic.length + 16 || new TextDecoder().decode(data.subarray(0, magic.length)) !== BACKUP_MAGIC) {
@@ -3088,10 +3243,15 @@ export async function importBackup(file: Blob): Promise<ImportResult> {
     off += 4
     if (off + len > data.length) throw new Error('The backup is incomplete')
     let plain: Uint8Array
+    const sealed = data.subarray(off, off + len)
+    const aad = backupAad(s.me, backupId, i)
     try {
-      plain = openRecord(key, data.subarray(off, off + len), backupAad(s.me, backupId, i))
+      plain = openRecord(key, sealed, aad)
     } catch {
-      throw new Error(i === 0 ? 'This backup belongs to another account' : 'The backup is damaged')
+      const other = i === 0 ? keys.slice(1).find((k) => { try { openRecord(k, sealed, aad); return true } catch { return false } }) : undefined
+      if (!other) throw new Error(i === 0 ? 'This backup belongs to another account' : 'The backup is damaged')
+      key = other
+      plain = openRecord(key, sealed, aad)
     }
     off += len
     let header: unknown
@@ -3156,4 +3316,110 @@ export async function importBackup(file: Blob): Promise<ImportResult> {
   refreshConversations()
   if (state.active) await openConv(state.active)
   return result
+}
+
+// ---------------------------------------------------------------------------
+// Public API: changing my keys
+// ---------------------------------------------------------------------------
+
+/**
+ * Replaces my keys with new ones (after a device was lost or the account may be compromised), so
+ * messages sent to me from now on can't be opened with the old keys. Needs the password. My
+ * other devices are signed out (they get the new keys when signing in again). Contacts see that
+ * my security code changed and have to accept the new one before they can message me again.
+ * My earlier keys are kept (locked with my password) only to open older messages and backups.
+ */
+export async function rotateKeys(password: string, newPassword?: string) {
+  const s = requireSession()
+  if (!password) throw new Error('Enter your password')
+  if (newPassword) checkPassword(newPassword)
+  if (newPassword && newPassword === password) throw new Error('The new password is the same as the old one')
+  const pre = await request(s, { type: 'prelogin' })
+  if (pre.type !== 'prelogin' || !isStr(pre.salt)) throw new Error('Unexpected reply from the server')
+  const keys = await deriveFromPassword(password, unb64(pre.salt))
+  const newSalt = newPassword ? randomSalt() : null
+  const lock = newPassword ? await deriveFromPassword(newPassword, newSalt!) : keys
+  // My own messages signed with the old key are accepted up to the server's newest message now.
+  const head = await request(s, { type: 'head' })
+  if (head.type !== 'head' || typeof head.seq !== 'number') throw new Error('Unexpected reply from the server')
+  const next = rotateIdentity(s.identity, head.seq)
+  // Kept on disk first: if the reply gets lost, the next connection finds out which keys the server has.
+  await set(K.pendingKeys, next, db)
+  const vault = sealVault(next, vaultData(s))
+  try {
+    await request(s, {
+      type: 'rotate_keys',
+      authKey: b64(keys.authKey),
+      oldSignPk: b64(s.identity.signPk),
+      signPk: b64(next.signPk),
+      encPk: b64(next.encPk),
+      bundle: lockIdentity(next, lock.lockKey, bundleName(s.saved.username)),
+      vault,
+      ...(newPassword ? { newSalt: b64(newSalt!), newAuthKey: b64(lock.authKey) } : {}),
+    })
+  } catch (e) {
+    if (e instanceof ServerError) {
+      await delMany([K.pendingKeys], db)
+      throw e
+    }
+    if (live(s)) await settleKeyChange(s).catch(noop)
+    throw e
+  }
+  await adoptKeys(s, next)
+  s.remoteVault = parseVault(vaultData(s))
+  for (const c of state.conversations) {
+    if (c.kind === 'dm') await systemMessage(s, c.id, 'You changed your security keys')
+  }
+}
+
+/** My synced settings as they're sealed into the vault. */
+function vaultData(s: Session): VaultData {
+  return JSON.parse(JSON.stringify({
+    pins: { ...s.pins },
+    groups: rawGroups(),
+    left: { ...s.left },
+    prefs: { ...s.prefs },
+    settings: s.settings,
+    profile: s.profile,
+    stars: { ...s.stars },
+  }))
+}
+
+async function adoptKeys(s: Session, next: Identity) {
+  if (!live(s)) return
+  s.saved.identity = next
+  await set(K.session, s.saved, db)
+  await delMany([K.pendingKeys], db)
+  if (state.account) state.account.fingerprint = fingerprint({ signPk: next.signPk, encPk: next.encPk })
+}
+
+/** A key change whose reply never came: use the new keys if the server has them, else forget them. */
+async function settleKeyChange(s: Session) {
+  const pending = await get<Identity>(K.pendingKeys, db)
+  if (!pending?.signPk || !live(s)) return
+  const res = await request(s, { type: 'lookup', ids: [s.me] })
+  const me = res.type === 'users' && Array.isArray(res.users) ? parseUser(res.users[0]) : null
+  if (!me) return
+  if (sameKeys(me.keys, { signPk: pending.signPk, encPk: pending.encPk })) await adoptKeys(s, pending)
+  else if (sameKeys(me.keys, { signPk: s.identity.signPk, encPk: s.identity.encPk })) await delMany([K.pendingKeys], db)
+}
+
+/** Sets (or with '' removes) my display name. Sent encrypted to my contacts, like my profile picture. */
+export function setDisplayName(input: string) {
+  const s = requireSession()
+  const name = cleanLabel(input, MAX_DISPLAY_NAME)
+  if ((s.profile.name ?? '') === name) return
+  s.profile = { ...s.profile, name: name || undefined, at: Date.now(), sentAt: 0 }
+  if (!name) delete s.profile.name
+  s.profileDirty = true
+  showMyAvatar(s)
+  refreshConversations()
+  scheduleFlush(s)
+  scheduleVaultPush(s)
+  try {
+    sendProfile(s, profileAudience(s))
+    s.profile.sentAt = Date.now()
+  } catch {
+    /* sent after reconnecting (sentAt stays 0) */
+  }
 }

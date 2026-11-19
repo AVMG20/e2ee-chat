@@ -84,3 +84,16 @@ export async function checkForUpdate(): Promise<AvailableUpdate | null> {
     return null
   }
 }
+
+/** Calls `cb` when the desktop window gains or loses focus (also when it's hidden). Resolves to an unsubscribe function. */
+export async function onWindowFocus(cb: (focused: boolean) => void): Promise<() => void> {
+  if (!isDesktop) return () => {}
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const win = getCurrentWindow()
+    cb(await win.isFocused())
+    return await win.onFocusChanged(({ payload }) => cb(payload))
+  } catch {
+    return () => {}
+  }
+}

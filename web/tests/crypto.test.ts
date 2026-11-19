@@ -135,3 +135,33 @@ describe('backups and notices', () => {
     expect(verifyNotice(alice.signPk, 'revoke A device1', undefined)).toBe(false)
   })
 })
+
+describe('changing keys', () => {
+  test('earlier keys survive locking and still open the vault', async () => {
+    const { rotateIdentity } = await import('../src/lib/crypto')
+    const first = generateIdentity()
+    sealVault(first, { hello: 1 })
+    const second = rotateIdentity(first, 10)
+    const third = rotateIdentity(second, 20)
+    expect(third.old?.map((o) => b64(o.encPk))).toEqual([b64(second.encPk), b64(first.encPk)])
+    const lockKey = new Uint8Array(32).fill(5)
+    const back = unlockIdentity(lockIdentity(third, lockKey, 'alice'), lockKey, 'alice')
+    expect(b64(back.signPk)).toBe(b64(third.signPk))
+    expect(back.old?.length).toBe(2)
+    expect(back.old?.[1]?.old).toBeUndefined()
+    expect(back.old?.map((o) => o.until)).toEqual([20, 10])
+    // The vault only opens with the current key (an old, maybe leaked key can't plant settings).
+    expect(() => openVault(back, vault)).toThrow()
+    expect(openVault(back, sealVault(back, { hello: 1 }))).toEqual({ hello: 1 })
+    // Notices are signed by every generation, so a device that only has an old key can check them.
+    const { signNotice, verifyNotice } = await import('../src/lib/crypto')
+    const sig = signNotice(back, 'revoke X d1')
+    expect(verifyNotice(first.signPk, 'revoke X d1', sig)).toBe(true)
+    expect(verifyNotice(third.signPk, 'revoke X d1', sig)).toBe(true)
+    expect(verifyNotice(bob.signPk, 'revoke X d1', sig)).toBe(false)
+    // A message sealed to the first key opens with it, found among the earlier keys.
+    const env = seal(bob, 'bob', [{ name: 'alice', encPk: first.encPk }], utf8('old'), 'id1', 1)
+    expect(new TextDecoder().decode(open(back.old![1]!, 'alice', bob.signPk, env))).toBe('old')
+    expect(() => open(back, 'alice', bob.signPk, env)).toThrow()
+  })
+})
