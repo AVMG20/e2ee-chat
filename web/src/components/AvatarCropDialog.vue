@@ -8,7 +8,8 @@ import {
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 
-const props = defineProps<{ file: File | null }>()
+/** With groupId it sets that group's picture instead of mine. */
+const props = defineProps<{ file: File | null; groupId?: string | null }>()
 const open = defineModel<boolean>('open', { required: true })
 
 const BOX = 280 // crop frame size on screen (px)
@@ -85,11 +86,13 @@ async function save() {
   busy.value = true
   try {
     const s = Math.round(size.value)
-    await chat.setAvatar(props.file, {
+    const crop = {
       x: Math.max(0, Math.round(cx.value - size.value / 2)),
       y: Math.max(0, Math.round(cy.value - size.value / 2)),
       size: s,
-    })
+    }
+    if (props.groupId) await chat.setGroupPicture(props.groupId, props.file, crop)
+    else await chat.setAvatar(props.file, crop)
     open.value = false
   } catch (e) {
     toast.error(errMsg(e))
@@ -103,7 +106,7 @@ async function save() {
   <Dialog v-model:open="open">
     <DialogContent class="sm:max-w-sm">
       <DialogHeader>
-        <DialogTitle>Profile picture</DialogTitle>
+        <DialogTitle>{{ groupId ? 'Group picture' : 'Profile picture' }}</DialogTitle>
         <DialogDescription>Drag to move the picture. Use the slider to zoom.</DialogDescription>
       </DialogHeader>
 

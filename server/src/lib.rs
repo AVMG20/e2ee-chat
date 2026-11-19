@@ -233,6 +233,12 @@ enum ClientMsg {
         #[serde(default)]
         new_auth_key: Option<String>,
     },
+    /// Sets my presence status: online, away, dnd or invisible.
+    SetStatus {
+        #[serde(default)]
+        req: u64,
+        status: String,
+    },
     /// The newest stored message seq (my own messages signed with keys I replace count up to there).
     Head {
         #[serde(default)]
@@ -472,6 +478,14 @@ impl AppState {
                     tx.execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {col} {def};"))?;
                 }
             }
+            // 0.4.4: chosen presence status (online, away, dnd, invisible).
+            let account_cols: Vec<String> = tx
+                .prepare("SELECT name FROM pragma_table_info('accounts')")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            if !account_cols.iter().any(|c| c == "status") {
+                tx.execute_batch("ALTER TABLE accounts ADD COLUMN status TEXT NOT NULL DEFAULT 'online';")?;
+            }
             tx.execute_batch(
                 "UPDATE sessions SET sid = lower(hex(randomblob(9))) WHERE sid IS NULL;
                  CREATE UNIQUE INDEX IF NOT EXISTS sessions_sid ON sessions(sid);
@@ -561,14 +575,21 @@ impl AppState {
         let online: HashSet<String> =
             if with_presence { self.online.lock().unwrap().keys().cloned().collect() } else { HashSet::new() };
         let db = self.db.lock().unwrap();
-        let mut stmt = db.prepare_cached("SELECT id, username, sign_pk, enc_pk FROM accounts WHERE id = ?1")?;
+        let mut stmt = db.prepare_cached("SELECT id, username, sign_pk, enc_pk, status FROM accounts WHERE id = ?1")?;
         let mut out = Vec::new();
         for id in ids {
             if let Some(v) = stmt
                 .query_row([id], |r| {
                     let id: String = r.get(0)?;
-                    Ok(json!({"id": id, "name": r.get::<_, String>(1)?, "signPk": r.get::<_, String>(2)?,
-                              "encPk": r.get::<_, String>(3)?, "online": online.contains(&id)}))
+                    let status: String = r.get(4)?;
+                    // Invisible looks offline; the status is only shared with presence (friends).
+                    let shown = online.contains(&id) && status != "invisible";
+                    let mut v = json!({"id": id, "name": r.get::<_, String>(1)?, "signPk": r.get::<_, String>(2)?,
+                              "encPk": r.get::<_, String>(3)?, "online": shown});
+                    if shown {
+                        v["status"] = json!(status);
+                    }
+                    Ok(v)
                 })
                 .optional()?
             {
@@ -693,8 +714,21 @@ impl AppState {
         }
     }
 
+    fn status_of(&self, user: &str) -> String {
+        let db = self.db.lock().unwrap();
+        db.query_row("SELECT status FROM accounts WHERE id = ?1", [user], |r| r.get(0))
+            .unwrap_or_else(|_| "online".to_string())
+    }
+
+    /// Tells a user's friends whether they're online (and with which status). Invisible looks offline.
     fn presence_changed(&self, user: &str, online: bool) {
-        let text = json!({"type": "presence", "id": user, "online": online}).to_string();
+        let status = self.status_of(user);
+        let shown = online && status != "invisible";
+        let mut msg = json!({"type": "presence", "id": user, "online": shown});
+        if shown {
+            msg["status"] = json!(status);
+        }
+        let text = msg.to_string();
         for friend in self.friend_ids(user).unwrap_or_default() {
             self.push_user(&friend, &text, None);
         }
@@ -1198,7 +1232,7 @@ async fn run_session(
 ) -> Result<()> {
     let mut welcome = me.welcome.clone();
     welcome["type"] = json!("welcome");
-    welcome["me"] = json!({"id": me.id, "username": me.username});
+    welcome["me"] = json!({"id": me.id, "username": me.username, "status": state.status_of(&me.id)});
     welcome["vault"] = json!(state.vault_of(&me.id)?);
     send_text(socket, welcome.to_string()).await?;
     send_text(socket, state.friends_snapshot(&me.id)?).await?;
@@ -1512,6 +1546,21 @@ async fn handle_client_msg(
                 db.execute("DELETE FROM sessions WHERE token_hash = ?1", [&me.token_hash])?;
             }
             return Ok(false);
+        }
+
+        ClientMsg::SetStatus { req, status } => {
+            if !matches!(status.as_str(), "online" | "away" | "dnd" | "invisible") {
+                send_text(socket, err(req, "Unknown status")).await?;
+                return Ok(true);
+            }
+            {
+                let db = state.db.lock().unwrap();
+                db.execute("UPDATE accounts SET status = ?1 WHERE id = ?2", params![status, my])?;
+            }
+            state.presence_changed(my, true);
+            // My other devices show the new status too.
+            state.push_user(my, &json!({"type": "status", "status": status}).to_string(), Some(session_id));
+            send_text(socket, ok(req)).await?;
         }
 
         ClientMsg::Head { req } => {

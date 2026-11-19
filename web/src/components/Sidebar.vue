@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { Archive, AtSign, BellOff, Check, ChevronRight, ChevronDown, Copy, Hash, Loader2, Moon, Pin, Plus, Search, Sun, TriangleAlert, UserPlus, Users } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import NewGroupDialog from '@/components/NewGroupDialog.vue'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import EntryMenu from '@/components/shell/EntryMenu.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { drafts } from '@/components/messages/state'
@@ -13,6 +14,23 @@ import { docToText } from '@/lib/render'
 import { isDark, toggleTheme } from '@/lib/theme'
 import { accountOpen, muteTitle, paletteOpen, useCopy } from '@/lib/ui'
 import type { Conversation } from '@/lib/types'
+import type { UserStatus } from '@/lib/chat'
+
+const STATUS_OPTIONS: { value: UserStatus; label: string; hint: string; dot: string }[] = [
+  { value: 'online', label: 'Online', hint: '', dot: 'bg-success' },
+  { value: 'away', label: 'Away', hint: '', dot: 'bg-amber-400' },
+  { value: 'dnd', label: 'Do not disturb', hint: 'No notifications or sounds', dot: 'bg-destructive' },
+  { value: 'invisible', label: 'Invisible', hint: 'You look offline', dot: 'bg-zinc-500' },
+]
+const statusLabel = computed(() => STATUS_OPTIONS.find((o) => o.value === chat.state.account?.status)?.label ?? 'Online')
+
+async function pickStatus(st: UserStatus) {
+  try {
+    await chat.setStatus(st)
+  } catch (e) {
+    toast.error(errMsg(e))
+  }
+}
 
 const groupOpen = ref(false)
 const { copied, copy } = useCopy()
@@ -129,7 +147,8 @@ async function select(c: Conversation) {
                 :data-active="chat.state.active === c.id" :data-unread="c.unread > 0"
                 @click="select(c)"
               >
-                <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><Hash class="size-4" /></span>
+                <img v-if="c.avatar" :src="c.avatar" alt="" class="size-8 shrink-0 rounded-full object-cover">
+                <span v-else class="flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><Hash class="size-4" /></span>
                 <span class="min-w-0 flex-1 leading-tight">
                   <span class="flex items-baseline gap-1.5">
                     <span class="min-w-0 flex-1 truncate text-[15px]" :class="c.unread > 0 ? 'font-semibold' : 'font-medium'">{{ c.title }}</span>
@@ -167,6 +186,7 @@ async function select(c: Conversation) {
                 @click="select(c)"
               >
                 <UserAvatar v-if="c.kind === 'dm'" :name="c.title" :id="idOf(c)" :src="contactOf(c)?.avatar" :size="32" :online="contactOf(c)?.online" />
+                <img v-else-if="c.avatar" :src="c.avatar" alt="" class="size-8 shrink-0 rounded-full object-cover">
                 <span v-else class="flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><Hash class="size-4" /></span>
                 <span class="min-w-0 flex-1 truncate text-[15px] font-medium">{{ c.title }}</span>
                 <span v-if="c.unread > 0" class="unread shrink-0" :class="c.muted && '!bg-zinc-500'">{{ c.unread > 99 ? '99+' : c.unread }}</span>
@@ -186,9 +206,28 @@ async function select(c: Conversation) {
           <span class="block truncate font-mono text-[11px] text-muted-foreground">{{ copied ? 'ID copied' : myId }}</span>
         </span>
       </button>
+      <DropdownMenu>
+        <DropdownMenuTrigger as-child>
+          <button class="btn btn-ghost btn-icon btn-sm shrink-0" :title="`Status: ${statusLabel}`" :aria-label="`Status: ${statusLabel}. Change status`">
+            <span class="size-2.5 rounded-full" :class="STATUS_OPTIONS.find((o) => o.value === chat.state.account?.status)?.dot ?? 'bg-success'" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="top" align="end" class="w-56">
+          <DropdownMenuLabel>Status</DropdownMenuLabel>
+          <DropdownMenuItem v-for="o in STATUS_OPTIONS" :key="o.value" @select="pickStatus(o.value)">
+            <span class="size-2.5 shrink-0 rounded-full" :class="o.dot" />
+            <span class="min-w-0 flex-1">
+              <span class="block">{{ o.label }}</span>
+              <span v-if="o.hint" class="block text-xs text-muted-foreground">{{ o.hint }}</span>
+            </span>
+            <Check v-if="chat.state.account?.status === o.value" class="size-4" />
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <button class="btn btn-ghost btn-icon btn-sm shrink-0" title="Copy your ID" aria-label="Copy your ID" @click="copy(myId)">
         <Check v-if="copied" class="text-success" /><Copy v-else />
-      </button>    </div>
+      </button>
+    </div>
 
     <NewGroupDialog v-model:open="groupOpen" @created="showConv = true" />
   </aside>

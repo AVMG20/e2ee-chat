@@ -2,7 +2,7 @@ import * as engine from './engine'
 import { docToPlainText } from './plaintext'
 import type { ChatMessage } from './types'
 
-export type { ChatState, CropArea } from './engine'
+export type { ChatState, CropArea, UserStatus } from './engine'
 
 /**
  * The chat engine API used by the UI. Every async function throws Error with a
@@ -57,6 +57,8 @@ export const chat = {
    * rotateKeys(password, newPassword) also changes the password (do that if it may have leaked).
    */
   rotateKeys: engine.rotateKeys,
+  /** Set my status: 'online' | 'away' | 'dnd' | 'invisible' (state.account.status). Synced to my devices; dnd silences notifications. */
+  setStatus: engine.setStatus,
   /** Set my display name ('' to use my username again). Sent encrypted to my contacts. state.account.displayName. */
   setDisplayName: engine.setDisplayName,
   /** Readable name of this device ("Firefox on Linux"). */
@@ -123,6 +125,8 @@ export const chat = {
   /** Adds friends (user IDs) to a group. */
   addMembers: engine.addMembers,
   leaveGroup: engine.leaveGroup,
+  /** Set (File/Blob, optional crop like setAvatar) or remove (null) a group's picture. Any member can. Shown as conversation.avatar. */
+  setGroupPicture: engine.setGroupPicture,
   /** Rename a group (admins only). */
   renameGroup: engine.renameGroup,
   /** Remove a member from a group (admins only). */

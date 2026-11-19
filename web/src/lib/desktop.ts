@@ -97,3 +97,14 @@ export async function onWindowFocus(cb: (focused: boolean) => void): Promise<() 
     return () => {}
   }
 }
+
+/** The desktop app's version ('' on the web). */
+export async function appVersion(): Promise<string> {
+  if (!isDesktop) return ''
+  try {
+    const { getVersion } = await import('@tauri-apps/api/app')
+    return await getVersion()
+  } catch {
+    return ''
+  }
+}

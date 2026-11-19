@@ -15,6 +15,7 @@ import { chat } from '@/lib/chat'
 import { notifyDenied, notifyEnabled, notifySupported, setNotify, setSound, soundEnabled } from '@/lib/notify'
 import { toast } from 'vue-sonner'
 import { errMsg } from '@/lib/format'
+import { type AvailableUpdate, appVersion, checkForUpdate } from '@/lib/desktop'
 
 const open = defineModel<boolean>('open', { required: true })
 defineEmits<{ changePassword: []; signOut: [] }>()
@@ -57,6 +58,31 @@ const deleteOpen = ref(false)
 const rotateOpen = ref(false)
 const backupBusy = ref<'' | 'export' | 'import'>('')
 const backupPicker = ref<HTMLInputElement | null>(null)
+
+// Desktop app: version and updates.
+const version = ref('')
+const update = ref<AvailableUpdate | null>(null)
+const updateBusy = ref<'' | 'check' | 'install'>('')
+if (chat.isDesktop) void appVersion().then((v) => (version.value = v))
+async function checkUpdates() {
+  updateBusy.value = 'check'
+  try {
+    update.value = await checkForUpdate()
+    if (!update.value) toast.success("You're on the latest version")
+  } finally {
+    updateBusy.value = ''
+  }
+}
+async function installUpdate() {
+  if (!update.value) return
+  updateBusy.value = 'install'
+  try {
+    await update.value.install()
+  } catch (e) {
+    toast.error(`Update failed: ${errMsg(e)}`)
+    updateBusy.value = ''
+  }
+}
 
 async function removeAvatar() {
   avatarBusy.value = true
@@ -231,6 +257,23 @@ async function toggleNotify(on: boolean) {
       <div class="grid gap-2 sm:grid-cols-2">
         <button class="btn btn-soft" @click="open = false; $emit('changePassword')"><KeyRound />Change password</button>
         <button class="btn btn-danger" @click="open = false; $emit('signOut')"><LogOut />Sign out</button>
+      </div>
+
+      <div v-if="chat.isDesktop" class="space-y-2">
+        <div class="eyebrow">App</div>
+        <div class="well flex flex-wrap items-center gap-3 rounded-md p-3 text-sm">
+          <span class="min-w-0 flex-1">
+            E2EE Chat {{ version }}
+            <span v-if="update" class="block text-xs text-muted-foreground">Version {{ update.version }} is available.</span>
+            <span v-else class="block text-xs text-muted-foreground">Updates are checked each time the app starts.</span>
+          </span>
+          <button v-if="update" class="btn btn-primary btn-sm" :disabled="!!updateBusy" @click="installUpdate">
+            <Loader2 v-if="updateBusy === 'install'" class="animate-spin" /><Download v-else />Update and restart
+          </button>
+          <button v-else class="btn btn-soft btn-sm" :disabled="!!updateBusy" @click="checkUpdates">
+            <Loader2 v-if="updateBusy === 'check'" class="animate-spin" /><RefreshCw v-else />Check for updates
+          </button>
+        </div>
       </div>
 
       <div class="space-y-2 border-t border-destructive/20 pt-4">

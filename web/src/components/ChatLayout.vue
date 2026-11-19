@@ -123,14 +123,23 @@ let stopNotifications = () => {}
 onMounted(() => {
   window.addEventListener('keydown', onKey)
   stopNotifications = startNotifications()
-  void offerUpdate()
+  if (chat.isDesktop) {
+    setTimeout(() => void offerUpdate(), 5000)
+    updateTimer = setInterval(() => void offerUpdate(), 6 * 3600_000)
+  }
 })
 
-/** Desktop app: offer a newer version once per start (a few seconds in, so startup isn't slowed). */
+/**
+ * Desktop app: offer a newer version a few seconds after start (so startup isn't slowed), then
+ * check again every 6 hours while it runs (it often stays open in the tray for days).
+ * Each version is offered once per run; Settings › App can always check and install.
+ */
+let offered = ''
+let updateTimer: ReturnType<typeof setInterval> | undefined
 async function offerUpdate() {
-  await new Promise((r) => setTimeout(r, 5000))
   const update = await checkForUpdate()
-  if (!update) return
+  if (!update || update.version === offered) return
+  offered = update.version
   toast(`Version ${update.version} is available`, {
     description: 'Install it now? The app restarts afterwards.',
     duration: Infinity,
@@ -147,6 +156,7 @@ async function offerUpdate() {
   })
 }
 onBeforeUnmount(() => {
+  clearInterval(updateTimer)
   window.removeEventListener('keydown', onKey)
   stopNotifications()
 })

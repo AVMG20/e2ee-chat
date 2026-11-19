@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { ArrowLeft, AtSign, Ban, Bell, BellOff, Check, Ellipsis, Loader2, ShieldAlert, ShieldCheck, UserMinus, UserPlus, Clock } from 'lucide-vue-next'
+import { ArrowLeft, AtSign, Ban, Bell, BellOff, Camera, Check, Ellipsis, Hash, Loader2, ShieldAlert, ShieldCheck, Trash2, UserMinus, UserPlus, Clock } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import CopyIdButton from '@/components/shell/CopyIdButton.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
+import AvatarCropDialog from '@/components/AvatarCropDialog.vue'
 import { chat } from '@/lib/chat'
 import { errMsg } from '@/lib/format'
 import { addMembersGroup, pendingAction } from '@/lib/nav'
@@ -20,6 +21,34 @@ const userName = computed(() => (userId.value ? contact.value?.name ?? chat.disp
 const showUser = computed(() => !!userId.value && (dmId.value ? !!contact.value : true))
 const group = computed(() => (conv.value?.kind === 'group' ? chat.state.groups[conv.value.id.slice(2)] ?? null : null))
 const isAdmin = computed(() => (group.value ? chat.isGroupAdmin(group.value.id) : false))
+
+// Group picture: any member can change it.
+const picPicker = ref<HTMLInputElement | null>(null)
+const picBusy = ref(false)
+const cropOpen = ref(false)
+const cropFile = ref<File | null>(null)
+function onPickPic(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file || !group.value) return
+  if (file.type === 'image/gif') void savePic(file) // kept animated, no cropping
+  else {
+    cropFile.value = file
+    cropOpen.value = true
+  }
+}
+async function savePic(file: File | null) {
+  if (!group.value) return
+  picBusy.value = true
+  try {
+    await chat.setGroupPicture(group.value.id, file)
+  } catch (e) {
+    toast.error(errMsg(e))
+  } finally {
+    picBusy.value = false
+  }
+}
 const adminOf = (m: string) => !!group.value?.admins?.includes(m)
 const me = computed(() => chat.state.account?.id)
 const busy = ref(false)
@@ -75,6 +104,28 @@ async function trust() {
   <div v-if="conv" class="space-y-5">
     <!-- Group -->
     <template v-if="group && !showUser">
+      <section class="flex flex-col items-center gap-2 text-center">
+        <button
+          class="group/pic relative size-24 shrink-0 overflow-hidden rounded-full outline-none focus-visible:shadow-[var(--glow)]"
+          title="Change group picture" aria-label="Change group picture" :disabled="picBusy" @click="picPicker?.click()"
+        >
+          <img v-if="conv.avatar" :src="conv.avatar" alt="" class="size-full object-cover">
+          <span v-else class="flex size-full items-center justify-center bg-soft"><Hash class="size-9 text-muted-foreground" /></span>
+          <span
+            class="absolute inset-0 flex items-center justify-center bg-black/55 text-white transition-opacity"
+            :class="picBusy ? 'opacity-100' : 'opacity-0 group-hover/pic:opacity-100 group-focus-visible/pic:opacity-100'"
+          >
+            <Loader2 v-if="picBusy" class="size-6 animate-spin" /><Camera v-else class="size-6" />
+          </span>
+        </button>
+        <h3 class="max-w-full truncate text-lg font-bold">{{ group.name }}</h3>
+        <div class="flex gap-3 text-xs">
+          <button class="text-[var(--link)] hover:underline disabled:opacity-50" :disabled="picBusy" @click="picPicker?.click()">Change picture</button>
+          <button v-if="conv.avatar" class="inline-flex items-center gap-1 text-muted-foreground hover:text-destructive hover:underline disabled:opacity-50" :disabled="picBusy" @click="savePic(null)"><Trash2 class="size-3" />Remove</button>
+        </div>
+        <input ref="picPicker" type="file" accept="image/*" class="hidden" @change="onPickPic">
+        <AvatarCropDialog v-model:open="cropOpen" :file="cropFile" :group-id="group.id" />
+      </section>
       <section>
         <h3 class="eyebrow mb-1.5 px-1">Members, {{ group.members.length }}</h3>
         <button v-if="isAdmin" class="btn btn-soft btn-sm mb-2 w-full" @click="addMembersGroup = group.id"><UserPlus />Add members</button>

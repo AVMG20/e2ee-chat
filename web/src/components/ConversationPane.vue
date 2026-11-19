@@ -156,7 +156,8 @@ async function leave() {
     <template v-else>
       <header class="flex h-12 shrink-0 items-center gap-2.5 border-b border-line px-3 shadow-sm">
         <button class="btn btn-ghost btn-icon btn-sm md:hidden" title="Back" aria-label="Back" @click="$emit('back')"><ArrowLeft /></button>
-        <Hash v-if="group" class="size-5 shrink-0 text-muted-foreground" />
+        <img v-if="group && conv.avatar" :src="conv.avatar" alt="" class="size-7 shrink-0 rounded-full object-cover">
+        <Hash v-else-if="group" class="size-5 shrink-0 text-muted-foreground" />
         <UserAvatar v-else :name="conv.title" :id="convKey" :src="contact?.avatar" :size="28" :online="contact?.online" style="--dot-ring: var(--background)" />
         <div class="flex min-w-0 flex-1 items-baseline gap-2.5">
           <h1 class="truncate text-[15px] font-bold">{{ conv.title }}</h1>

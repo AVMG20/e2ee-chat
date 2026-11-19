@@ -10,6 +10,7 @@ import { openConversation } from '@/lib/nav'
 import type { ConvId, SearchHit } from '@/lib/types'
 
 const open = defineModel<boolean>('open', { required: true })
+const convAvatar = (id: ConvId) => chat.state.conversations.find((c) => c.id === id)?.avatar ?? null
 
 interface Item { id: ConvId; title: string; group: boolean; userId?: string; unread: number; sub: string; haystack: string }
 
@@ -168,7 +169,8 @@ async function choose(it: Item | undefined) {
             style="--dot-ring: var(--popover)"
             @mousemove="index = n" @click="choose(it)"
           >
-            <div v-if="it.group" class="flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><Hash class="size-4" /></div>
+            <img v-if="it.group && convAvatar(it.id)" :src="convAvatar(it.id)!" alt="" class="size-8 shrink-0 rounded-full object-cover">
+            <div v-else-if="it.group" class="flex size-8 shrink-0 items-center justify-center rounded-full bg-soft"><Hash class="size-4" /></div>
             <UserAvatar v-else :name="it.title" :id="it.userId" :src="it.userId ? chat.state.contacts[it.userId]?.avatar : null" :size="32" :online="chat.state.contacts[it.userId!]?.online" />
             <span class="min-w-0 flex-1 truncate text-[15px] font-medium">{{ it.title }}</span>
             <span v-if="it.sub" class="text-xs text-muted-foreground">{{ it.sub }}</span>

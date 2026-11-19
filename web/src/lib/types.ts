@@ -11,6 +11,8 @@ export interface Account {
   displayName: string
   /** Object URL of my profile picture, or null. */
   avatar: string | null
+  /** My status: online, away, dnd (do not disturb) or invisible (I look offline to friends). */
+  status: 'online' | 'away' | 'dnd' | 'invisible'
   /** My security code (8 groups of 5 digits): friends compare it with what they see for me. */
   fingerprint: string
 }
@@ -28,6 +30,8 @@ export interface Contact {
   friend: boolean
   /** Only known for friends. */
   online: boolean
+  /** What their dot shows: online (green), away (yellow), dnd (red), offline (also when invisible). Friends only. */
+  status: 'online' | 'away' | 'dnd' | 'offline'
   /** Fingerprint of the key pinned for this contact (shown for out-of-band verification). */
   fingerprint: string
   /** User marked this contact's fingerprint as verified in person. */
@@ -112,6 +116,8 @@ export interface Conversation {
   pinned: boolean
   /** Hidden from the main list (comes back on a new message unless muted). */
   archived: boolean
+  /** Group picture, or the other person's profile picture in a DM (object URL), or null. */
+  avatar: string | null
 }
 
 export interface SearchHit {

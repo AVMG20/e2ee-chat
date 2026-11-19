@@ -549,3 +549,40 @@ async fn keys_can_be_changed() {
     let w = recv(&mut ws).await;
     assert_eq!((w["bundle"].as_str(), w["vault"].as_str()), (Some("new-locked-keys"), Some("new-vault")));
 }
+
+#[tokio::test]
+async fn presence_status() {
+    let (url, _dir) = start().await;
+    let mut a = register(&url, "alice", 1).await.unwrap();
+    let mut b = register(&url, "bob", 2).await.unwrap();
+    befriend(&mut a, &mut b).await;
+    let mut a2 = resume(&url, &a.token, 0).await;
+
+    send(&mut a.ws, json!({"type": "set_status", "req": 1, "status": "busy"})).await;
+    assert_eq!(recv_type(&mut a.ws, "error").await["req"], 1);
+    send(&mut a.ws, json!({"type": "set_status", "req": 2, "status": "dnd"})).await;
+    assert_eq!(recv_type(&mut a.ws, "ok").await["req"], 2);
+    assert_eq!(recv_type(&mut a2, "status").await["status"], "dnd");
+    loop {
+        let p = recv_type(&mut b.ws, "presence").await;
+        if p["status"] == "dnd" {
+            assert_eq!(p["online"], true);
+            break;
+        }
+    }
+    // Invisible looks offline to friends.
+    send(&mut a.ws, json!({"type": "set_status", "req": 3, "status": "invisible"})).await;
+    assert_eq!(recv_type(&mut a.ws, "ok").await["req"], 3);
+    let p = recv_type(&mut b.ws, "presence").await;
+    assert_eq!((p["online"].as_bool(), p["status"].is_null()), (Some(false), true));
+    send(&mut b.ws, json!({"type": "friend_remove", "req": 4, "id": "XXXXXXXX"})).await;
+    let (mut ws, _) = connect_async(&url).await.unwrap();
+    send(&mut ws, json!({"type": "resume", "token": b.token})).await;
+    assert_eq!(recv(&mut ws).await["type"], "welcome");
+    let snap = recv_type(&mut ws, "friends").await;
+    assert_eq!(snap["friends"][0]["online"], false);
+    // My own devices learn my status when connecting.
+    let (mut ws, _) = connect_async(&url).await.unwrap();
+    send(&mut ws, json!({"type": "resume", "token": a.token})).await;
+    assert_eq!(recv(&mut ws).await["me"]["status"], "invisible");
+}

@@ -56,6 +56,8 @@ type PayloadBody =
   | { t: 'gname'; id: string; name: string }
   | { t: 'gkick'; id: string; member: string }
   | { t: 'gadmin'; id: string; member: string; on: boolean }
+  /** Group picture (the attachment; empty to remove it). Any member can change it. */
+  | { t: 'gpic'; id: string; mime: string }
   /** I've read the conversation up to this message time. Also syncs unread counts between my devices. */
   | { t: 'read'; ts: number; with?: string }
   /** My profile picture (the attachment; empty to remove it). Sent to all my contacts. */
@@ -142,6 +144,8 @@ function validHeader(h: PayloadHeader): boolean {
       return validGroupId(b.id) && validId(b.member)
     case 'gadmin':
       return validGroupId(b.id) && validId(b.member) && typeof b.on === 'boolean'
+    case 'gpic':
+      return validGroupId(b.id) && isStr(b.mime)
     case 'read':
       return typeof b.ts === 'number' && Number.isFinite(b.ts) && (b.with === undefined || validId(b.with))
     case 'profile':
@@ -269,6 +273,7 @@ const K = {
   held: 'held',
   conv: (c: ConvId) => `conv:${c}`,
   out: (envId: string) => `out:${envId}`,
+  gpic: (groupId: string) => `gpic:${groupId}`,
   /** New keys being sent to the server (kept until it's clear whether the change went through). */
   pendingKeys: 'pendingKeys',
   file: (mid: string) => `file:${mid}`,
@@ -357,10 +362,20 @@ interface ServerUser {
   signPk: string
   encPk: string
   online: boolean
+  /** Their chosen status while online (friends only). */
+  status?: string
 }
+
+const STATUSES = ['online', 'away', 'dnd', 'invisible'] as const
+/** online (green), away (yellow), dnd: do not disturb (red, no notifications), invisible (looks offline). */
+export type UserStatus = (typeof STATUSES)[number]
+const validStatus = (v: unknown): v is UserStatus => STATUSES.includes(v as UserStatus)
+/** What a friend's dot shows. */
+const shownStatus = (online: boolean, status: unknown): Contact['status'] =>
+  !online ? 'offline' : validStatus(status) && status !== 'invisible' ? status : 'online'
 interface Welcome {
   type: 'welcome'
-  me: { id: string; username: string }
+  me: { id: string; username: string; status?: string }
   vault: string | null
   token?: string
   bundle?: string
@@ -370,7 +385,8 @@ type ServerMsg =
   | { type: 'prelogin'; req?: number; salt: string }
   | Welcome
   | { type: 'friends'; friends: ServerUser[]; incoming: FriendRequest[]; outgoing: FriendRequest[]; blocked?: FriendRequest[] }
-  | { type: 'presence'; id: string; online: boolean }
+  | { type: 'presence'; id: string; online: boolean; status?: string }
+  | { type: 'status'; status: string }
   | { type: 'deliver'; seq: number; envelope: Envelope }
   | { type: 'signal'; envelope: Envelope }
   | { type: 'synced'; seq: number }
@@ -530,6 +546,8 @@ class Session {
   prefs: Dict<ConvPrefs> = dict()
   settings: Settings = defaultSettings()
   profile: Profile = defaultProfile()
+  /** Object URLs of group pictures (group ID → URL). */
+  groupPicUrls = new Map<string, string>()
   /** Display names contacts chose (user ID → name). */
   names = new Map<string, string>()
   /** Object URLs of profile pictures (user ID → URL); mine under my own ID. */
@@ -896,7 +914,7 @@ function parseUser(u: unknown): (ServerUser & { keys: PublicKeys }) | null {
   try {
     const keys = { signPk: unb64(v.signPk), encPk: unb64(v.encPk) }
     if (keys.signPk.length !== 32 || keys.encPk.length !== 32) return null
-    return { id: v.id, name: cleanLabel(v.name, 32), signPk: v.signPk, encPk: v.encPk, online: !!v.online, keys }
+    return { id: v.id, name: cleanLabel(v.name, 32), signPk: v.signPk, encPk: v.encPk, online: !!v.online, status: v.status, keys }
   } catch {
     return null
   }
@@ -916,6 +934,7 @@ function updateContactFromPin(s: Session, id: string, patch: Partial<Contact> = 
     username: pin.name,
     friend: prev?.friend ?? false,
     online: prev?.online ?? false,
+    status: prev?.status ?? 'offline',
     fingerprint: fingerprint(pinKeys(pin)),
     verified: pin.verified,
     keyChanged: changed,
@@ -1044,6 +1063,7 @@ function applyServerUser(s: Session, raw: unknown, opts: { pin: boolean; friend?
   if (opts.friend !== undefined) {
     patch.friend = opts.friend
     patch.online = u.online
+    patch.status = shownStatus(u.online, u.status)
   }
   updateContactFromPin(s, u.id, patch)
   return added
@@ -1089,6 +1109,7 @@ function applyFriends(s: Session, m: Extract<ServerMsg, { type: 'friends' }>) {
     if (!ids.has(c.id)) {
       c.friend = false
       c.online = false
+      c.status = 'offline'
     }
   }
   const reqs = (list: unknown): FriendRequest[] =>
@@ -1139,6 +1160,7 @@ function refreshConversations() {
       id, kind, title, unread: m.unread, lastTs: m.lastTs, preview: m.preview,
       muted, mutedUntil: muted && p!.until ? p!.until : null, mentionsOnly: !!p?.mentions,
       pinned: !!p?.pinned, archived: !!p?.archived,
+      avatar: kind === 'group' ? (s.groupPicUrls.get(id.slice(2)) ?? null) : (s.avatarUrls.get(id.slice(3)) ?? null),
     })
   }
   clearTimeout(s.muteTimer)
@@ -1783,6 +1805,16 @@ async function handlePayload(
     return
   }
 
+  if (body.t === 'gpic') {
+    if (pc.t !== 'g' || pc.id !== body.id) return
+    const g = state.groups[body.id]
+    if (!g || !g.members.includes(sender) || (!mine && state.blocked.some((b) => b.id === sender))) return
+    if (await receiveGroupPic(s, g.id, ts, body.mime, attachment)) {
+      await systemMessage(s, `g:${g.id}`, `${mine ? 'You' : displayName(sender)} ${attachment.length ? 'changed' : 'removed'} the group picture`, ts)
+    }
+    return
+  }
+
   if (body.t === 'profile') {
     if (mine || pc.t !== 'dm' || !s.pins[sender] || state.blocked.some((b) => b.id === sender)) return
     await receiveProfile(s, sender, ts, body.mime, attachment, body.name)
@@ -1915,9 +1947,16 @@ function dispatch(s: Session, m: ServerMsg) {
       return
     case 'presence': {
       const c = validId(m.id) ? state.contacts[m.id] : undefined
-      if (c?.friend) c.online = !!m.online
+      if (c?.friend) {
+        c.online = !!m.online
+        c.status = shownStatus(!!m.online, (m as { status?: unknown }).status)
+      }
       return
     }
+    case 'status':
+      // Changed on another of my devices.
+      if (state.account && validStatus(m.status)) state.account.status = m.status
+      return
     case 'pong':
       return
     case 'signal':
@@ -1967,6 +2006,7 @@ async function handleQueued(s: Session, m: ServerMsg) {
 
 /** Takes over an authenticated connection. */
 function attach(s: Session, conn: Conn, w: Welcome) {
+  if (state.account && validStatus(w.me?.status)) state.account.status = w.me.status
   s.conn = conn
   s.retry = 0
   state.status = 'online'
@@ -2101,6 +2141,7 @@ function stop(s: Session) {
   s.requests.clear()
   for (const f of s.fileUrls.values()) URL.revokeObjectURL(f.url)
   for (const url of s.avatarUrls.values()) URL.revokeObjectURL(url)
+  for (const url of s.groupPicUrls.values()) URL.revokeObjectURL(url)
 }
 
 function resetState() {
@@ -2144,12 +2185,19 @@ async function loadSession(saved: Saved): Promise<Session> {
   s.held = Array.isArray(held) ? held : []
   const avatarKeys: string[] = []
   const outKeys: string[] = []
+  const picKeys: string[] = []
   for (const key of await idbKeys(db)) {
     if (!isStr(key)) continue
     if (key.startsWith('seen:')) s.seen.add(key.slice(5))
     else if (key.startsWith('avatar:')) avatarKeys.push(key)
     else if (key.startsWith('out:')) outKeys.push(key)
+    else if (key.startsWith('gpic:')) picKeys.push(key)
   }
+  const pics = await getMany<StoredAvatar | undefined>(picKeys, db)
+  picKeys.forEach((key, i) => {
+    const p = pics[i]
+    if (p?.bytes instanceof Uint8Array && p.bytes.length) setGroupPicUrl(s, key.slice(5), p.bytes, p.mime)
+  })
   const outgoing = await getMany<Outgoing | undefined>(outKeys, db)
   outKeys.forEach((key, i) => {
     const o = outgoing[i]
@@ -2169,7 +2217,7 @@ async function loadSession(saved: Saved): Promise<Session> {
   session = s
   resetState()
   state.account = {
-    server: saved.server, id: saved.id, username: saved.username, avatar: null, displayName: saved.username,
+    server: saved.server, id: saved.id, username: saved.username, avatar: null, displayName: saved.username, status: 'online',
     fingerprint: fingerprint({ signPk: saved.identity.signPk, encPk: saved.identity.encPk }),
   }
   state.settings = { readReceipts: s.settings.readReceipts }
@@ -2699,13 +2747,24 @@ export async function addMembers(groupId: string, members: string[]) {
   g.members = all
   groupsChanged(s)
   await systemMessage(s, `g:${g.id}`, `You added ${names(added)}`)
+  // New members get the current group picture (dated as before, so others ignore the copy).
+  const pic = await get<StoredAvatar>(K.gpic(g.id), db)
+  const to = added.filter((id) => s.pins[id] && !s.gone.has(id))
+  if (pic?.bytes?.length && to.length) {
+    try {
+      sendEnvelope(s, to, { conv: { t: 'g', id: g.id }, body: { t: 'gpic', id: g.id, mime: pic.mime } }, pic.bytes, randomId(), pic.at)
+    } catch {
+      /* they'll get it with the next change */
+    }
+  }
 }
 
 /** `remember`: keep it out for good (I left), so other devices and old invites don't bring it back. */
 async function removeGroupLocally(s: Session, groupId: string, remember = true) {
   const conv: ConvId = `g:${groupId}`
   const list = await loadConv(s, conv)
-  await delMany([K.conv(conv), ...list.filter((m) => m.kind === 'file').map((m) => K.file(m.id))], db)
+  await delMany([K.conv(conv), K.gpic(groupId), ...list.filter((m) => m.kind === 'file').map((m) => K.file(m.id))], db)
+  setGroupPicUrl(s, groupId, null, '')
   s.convs.delete(conv)
   s.dirtyConvs.delete(conv)
   for (const [mid, f] of s.fileUrls) {
@@ -2839,6 +2898,7 @@ export function setConvPrefs(
 export function shouldNotify(m: ChatMessage): boolean {
   const s = session
   if (!s) return false
+  if (state.account?.status === 'dnd') return false
   const p = s.prefs[m.conv]
   if (isMuted(p)) return false
   return !p?.mentions || mentionsMe(s, m)
@@ -3481,4 +3541,54 @@ export function setDisplayName(input: string) {
 /** Does this message mention me (@username or @display name) or reply to me? */
 export function messageMentionsMe(m: ChatMessage): boolean {
   return !!session && mentionsMe(session, m)
+}
+
+/** Sets my status for my friends (and my other devices). Do not disturb also silences notifications here. */
+export async function setStatus(status: UserStatus) {
+  const s = requireSession()
+  if (!validStatus(status)) throw new Error('Unknown status')
+  await request(s, { type: 'set_status', status })
+  if (state.account) state.account.status = status
+}
+
+// ---------------------------------------------------------------------------
+// Group pictures
+// ---------------------------------------------------------------------------
+
+function setGroupPicUrl(s: Session, groupId: string, bytes: Uint8Array | null, mime: string) {
+  const old = s.groupPicUrls.get(groupId)
+  if (old) URL.revokeObjectURL(old)
+  s.groupPicUrls.delete(groupId)
+  if (bytes?.length) s.groupPicUrls.set(groupId, URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: safeMime(mime) })))
+}
+
+/** Stores a group picture if it's newer than mine. Resolves true if it changed. Only call from inside serial(). */
+async function receiveGroupPic(s: Session, groupId: string, ts: number, mime: string, bytes: Uint8Array): Promise<boolean> {
+  if (bytes.length > MAX_AVATAR_BYTES || (bytes.length && !SAFE_MIME.has(mime))) return false
+  const prev = await get<StoredAvatar>(K.gpic(groupId), db)
+  if (prev && prev.at >= ts) return false
+  await set(K.gpic(groupId), { at: ts, mime, bytes } satisfies StoredAvatar, db)
+  if (!live(s)) return false
+  setGroupPicUrl(s, groupId, bytes, mime)
+  refreshConversations()
+  return true
+}
+
+/**
+ * Sets (or with null removes) a group's picture, for everyone in it. Any member can. `crop` as for
+ * setAvatar; animated GIFs are kept as they are.
+ */
+export async function setGroupPicture(groupId: string, file: Blob | null, crop?: CropArea) {
+  const s = requireSession()
+  const g = state.groups[groupId]
+  if (!g) throw new Error('Group not found')
+  const img = file ? await encodeAvatar(file, crop) : null
+  const bytes = img?.bytes ?? new Uint8Array(0)
+  const mime = img?.mime ?? ''
+  const ts = Date.now()
+  const to = await groupRecipients(s, g.members)
+  sendEnvelope(s, to, { conv: { t: 'g', id: g.id }, body: { t: 'gpic', id: g.id, mime } }, bytes, randomId(), ts)
+  await serial(s, async () => {
+    if (await receiveGroupPic(s, g.id, ts, mime, bytes)) await systemMessage(s, `g:${g.id}`, `You ${bytes.length ? 'changed' : 'removed'} the group picture`, ts)
+  })
 }
