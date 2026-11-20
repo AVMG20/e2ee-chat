@@ -1,8 +1,11 @@
 use tauri::{
     AppHandle, Manager, Url, WebviewWindowBuilder, WindowEvent,
     webview::DownloadEvent,
-    menu::{Menu, MenuItem},
     plugin::Builder as PluginBuilder,
+};
+#[cfg(not(target_os = "macos"))]
+use tauri::{
+    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_opener::OpenerExt;
@@ -31,6 +34,42 @@ fn show_main(app: &AppHandle) {
         let _ = win.unminimize();
         let _ = win.set_focus();
     }
+}
+
+/// Windows/Linux: a tray icon to bring the window back and to quit (closing the window keeps the
+/// app running). macOS has none: the Dock icon brings the window back and Cmd+Q quits.
+#[cfg(not(target_os = "macos"))]
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open E2EE Chat", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("E2EE Chat")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main(app),
+            "quit" => {
+                let _ = app.save_window_state(WINDOW_STATE);
+                app.exit(0)
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -75,38 +114,12 @@ pub fn run() {
                     })
                     .build()?;
             }
-            let open = MenuItem::with_id(app, "open", "Open E2EE Chat", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
-            let mut tray = TrayIconBuilder::with_id("main")
-                .tooltip("E2EE Chat")
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "open" => show_main(app),
-                    "quit" => {
-                        let _ = app.save_window_state(WINDOW_STATE);
-                        app.exit(0)
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        show_main(tray.app_handle());
-                    }
-                });
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
-            }
-            tray.build(app)?;
+            #[cfg(not(target_os = "macos"))]
+            build_tray(app)?;
             Ok(())
         })
-        // Closing the window keeps the app (and its connection/notifications) alive in the tray.
+        // Closing the window keeps the app (and its connection/notifications) alive: in the tray, or
+        // on macOS in the Dock.
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
@@ -126,8 +139,14 @@ pub fn run() {
 
     app.run(|_app, _event| {
         #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::Reopen { .. } = _event {
-            show_main(_app);
+        match _event {
+            // Clicking the Dock icon brings the hidden window back.
+            tauri::RunEvent::Reopen { .. } => show_main(_app),
+            // Cmd+Q / Quit from the Dock: remember the window first (it may be hidden).
+            tauri::RunEvent::ExitRequested { .. } => {
+                let _ = _app.save_window_state(WINDOW_STATE);
+            }
+            _ => {}
         }
     });
 }
